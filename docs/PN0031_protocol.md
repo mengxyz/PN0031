@@ -1,0 +1,153 @@
+# PN0031 RFID Module Protocol (Markdown)
+
+Source workbook: `PN0031 250411 zh-CN to en 2026-01-31 02-15-55.xlsx`
+
+## Serial Settings
+
+- Baud rate: `115200`
+- Data bits: `8`
+- Stop bits: `1`
+- Parity: `None`
+
+## Frame Format
+
+Host sends and module responds with this frame:
+
+`STX AD FT FC LEN_L LEN_H DATA... BCC ETX`
+
+- `STX` (1B): `0xA0`
+- `AD` (1B): reader address (can use `0x00` or `0xFF`)
+- `FT` (1B): command category
+- `FC` (1B): command code
+- `LEN` (2B, little-endian): `DATA` length only
+- `DATA` (N bytes): command parameters or response payload
+- `BCC` (1B): XOR of all bytes before `BCC` (including `STX`)
+- `ETX` (1B): `0x0D`
+
+## Command Table
+
+| Order | FT | FC | Command | Command Data | Response Data | Notes |
+|---|---|---|---|---|---|---|
+| 1.0 | `0x00` | `0x00` | Set machine number | Machine number (1B) | Success: status `0` (1B); failure: status non-zero (1B) | - |
+| 2.0 | `0x02` | `0x20` | Read specified antenna card number | Antenna number (1B) | Success: status `0` + antenna (1B) + UID length (1B) + UID (NB); failure: non-zero status | Antenna numbers: 1, 2, 3, 4 |
+| 3.0 | `0x02` | `0x21` | Read all antenna card numbers | none | Success: status `0` + repeated [antenna + UID length + UID]; failure: non-zero status | - |
+| 4.0 | `0x02` | `0x22` | Read specified block data | Antenna (1B) + block (1B) + key position (1B) + key type (1B) + key (6B) | Success: status `0` + antenna (1B) + block (1B) + data (16B); failure: non-zero status | Key pos: `0` transport, `1` EEPROM key (not yet supported); Key type: `0` KEYA, `1` KEYB |
+| 5.0 | `0x02` | `0x23` | Write specified block data | Antenna (1B) + block (1B) + key position (1B) + key type (1B) + key (6B) + data (16B) | Success: status `0` + antenna (1B) + block (1B); failure: non-zero status | Both data and keys can be manipulated |
+| 6.0 | `0x02` | `0x24` | Read specified sector data | Antenna (1B) + sector (1B) + key position (1B) + key type (1B) + key (6B) | Success: status `0` + antenna (1B) + sector (1B) + data (48B); failure: non-zero status | Read only data, not keys |
+| 7.0 | `0x02` | `0x25` | Write specified sector data | Antenna (1B) + sector (1B) + key position (1B) + key type (1B) + key (6B) + data (48B) | Success: status `0` + antenna (1B) + sector (1B); failure: non-zero status | Only write data, not keys |
+
+## Data Examples (from workbook)
+
+### 1.0 Set machine number
+
+Send:
+```text
+A0000000010001A00D
+```
+
+Response:
+```text
+A0010000010000A00D
+```
+
+### 2.0 Read specified antenna card number (`FC=0x20`)
+
+Send:
+```text
+A0000220010001820D
+A0000220010002810D
+A0000220010003800D
+A0000220010004870D
+```
+
+Response:
+```text
+A0000220070000010413CD7E38180D
+A0000220070000020413CD7E381B0D
+A0000220070000030413CD7E381A0D
+A0000220070000040413CD7E381D0D
+```
+
+### 3.0 Read all antenna card numbers (`FC=0x21`)
+
+Send:
+```text
+A00002210000830D
+```
+
+Response:
+```text
+A0000221190000010413CD7E380204A6F253BB0304067B54BB0404D33296431C0D
+```
+
+### 4.0 Read specified block data (`FC=0x22`)
+
+Send:
+```text
+A00002220A0001040000FFFFFFFFFFFF8F0D
+A00002220A0002040000FFFFFFFFFFFF8C0D
+A00002220A0003040000FFFFFFFFFFFF8D0D
+A00002220A0004040000FFFFFFFFFFFF8A0D
+```
+
+Response:
+```text
+A000022213000001040120CEF7C3C5B4B5D1A920D1A7C9FA20B40D
+A0000222130000020400000000000000000000000000000000950D
+A0000222130000030400112233445566778899AABBCCDDEEFF940D
+A0000222130000040400000000000000000000000000000000930D
+```
+
+### 5.0 Write specified block data (`FC=0x23`)
+
+Send:
+```text
+A00002231A0001040000FFFFFFFFFFFF00112233445566778899AABBCCDDEEFF9E0D
+A00002231A0001040000FFFFFFFFFFFF00112233445566778899AABBCCDDEEFF9E0D
+A00002231A0003040000FFFFFFFFFFFF00112233445566778899AABBCCDDEEFF9C0D
+A00002231A0004040000FFFFFFFFFFFF00112233445566778899AABBCCDDEEFF9B0D
+```
+
+Response:
+```text
+A00002230300000104870D
+A00002230300000204840D
+A00002230300000304850D
+A00002230300000404820D
+```
+
+### 6.0 Read specified sector data (`FC=0x24`)
+
+Send:
+```text
+A00002240A0001010000FFFFFFFFFFFF8C0D
+A00002240A0002010000FFFFFFFFFFFF8F0D
+A00002240A0003010000FFFFFFFFFFFF8E0D
+A00002240A0004010000FFFFFFFFFFFF890D
+```
+
+Response:
+```text
+A0000224330000010100112233445566778899AABBCCDDEEFF3132333435363738393020F90D000000000000000000000000000000000000000600D
+A0000224330000020100112233445566778899AABBCCDDEEFF000000000000000000000000000000000000000000000000000000000000000B60D
+A0000224330000030100112233445566778899AABBCCDDEEFFFFEEDDCCBBAA9988776655443322110000000000000000000000000000000000B70D
+A0000224330000040100112233445566778899AABBCCDDEEFF0000000000000000000000000000000000000000000000000000000000000000B00D
+```
+
+### 7.0 Write specified sector data (`FC=0x25`)
+
+Send:
+```text
+A00002253A0001010000FFFFFFFFFFFF00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFFBD0D
+A00002253A0002010000FFFFFFFFFFFF00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFFBE0D
+A00002253A0003010000FFFFFFFFFFFF00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFFBF0D
+A00002253A0004010000FFFFFFFFFFFF00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899AABBCCDDEEFFB80D
+```
+
+Response:
+```text
+A00002250300000101840D
+A00002250300000201870D
+A00002250300000301860D
+A00002250300000401810D
+```

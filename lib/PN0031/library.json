@@ -1,0 +1,14 @@
+{
+  "name": "PN0031",
+  "version": "0.1.0",
+  "description": "Arduino library for PN0031 RFID module over UART",
+  "keywords": ["rfid", "pn0031", "uart", "esp32c6"],
+  "authors": [
+    {
+      "name": "Local Workspace"
+    }
+  ],
+  "frameworks": "arduino",
+  "platforms": "*",
+  "headers": "PN0031.h"
+}

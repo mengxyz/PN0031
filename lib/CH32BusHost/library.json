@@ -1,0 +1,14 @@
+{
+  "name": "CH32BusHost",
+  "version": "0.1.0",
+  "description": "Arduino host library for CH32V006 RS485 app bus and WCH IAP flashing",
+  "keywords": ["ch32", "rs485", "iap", "firmware", "littlefs"],
+  "authors": [
+    {
+      "name": "Local Workspace"
+    }
+  ],
+  "frameworks": "arduino",
+  "platforms": "*",
+  "headers": "CH32BusHost.h"
+}
