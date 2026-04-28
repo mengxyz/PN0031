@@ -2,39 +2,53 @@
 #include <string.h>
 #include <ch32v00X.h>
 
-#define IAP_UART_BAUD 115200U
+#define IAP_UART_BAUD  115200U
+
+/* Device identity — change DEVICE_ADDR per unit (0x01–0xFE). */
+#define DEV_TYPE_HEATER   0x00U
+#define DEV_TYPE_REWINDER 0x01U
+#define DEVICE_TYPE       DEV_TYPE_REWINDER
+#define DEVICE_ADDR       0x01U
+#define BROADCAST_ADDR    0xFFU
 
 #define RS485_DE_PORT GPIOD
 #define RS485_DE_PIN  GPIO_Pin_4
 
-#define LED_ERR_PORT  GPIOC
-#define LED_ERR_PIN   GPIO_Pin_6
-#define LED_ACT_PORT  GPIOC
-#define LED_ACT_PIN   GPIO_Pin_7
+/* Single status LED on PD0. */
+#define LED_PORT GPIOD
+#define LED_PIN  GPIO_Pin_0
 
-#define APP_FLASH_BASE 0x08000000UL
-#define IAP_CAL_ADDR   (0x08004000UL - 4UL)
+#define APP_FLASH_BASE 0x08002000UL                       /* app starts after 8KB bootloader */
+#define IAP_CAL_ADDR   (0x08000000UL + 62UL*1024UL - 4UL) /* last word of 62KB flash = 0x0800F7FC */
 #define IAP_CHECK_NUM  0x5AA55AA5UL
 
 #define UART_SYNC_HEAD1 0xAAU
 #define UART_SYNC_HEAD2 0x55U
 
+/*
+ * Protocol request:  AA 55 DEST CMD LEN [DATA×LEN] CSUM_L CSUM_H 55 AA
+ *   DEST 0xFF = broadcast (all bootloaders respond, staggered by address)
+ *   CSUM = uint16 sum of (DEST + CMD + LEN + DATA bytes)
+ *
+ * Protocol response: AA 55 DEV_ADDR ERR EXT 55 AA  (7 bytes)
+ *   ERR  0x00 = ok, 0x01 = error
+ *   EXT  = DEVICE_TYPE for CMD_SCAN, 0x00 otherwise
+ */
+#define CMD_SCAN       0x01U   /* broadcast-safe device discovery */
 #define CMD_IAP_PROM   0x80U
 #define CMD_IAP_ERASE  0x81U
 #define CMD_IAP_VERIFY 0x82U
 #define CMD_IAP_END    0x83U
-#define CMD_JUMP_IAP   0x84U
+#define CMD_JUMP_APP   0x84U   /* jump to app if magic word present, no flash */
 
 #define ERR_SUCCESS 0x00U
 #define ERR_ERROR   0x01U
-#define ERR_END     0x02U
 
 #define DATA_BUF_SIZE 64U
 
-#define FLASH_KEY1           0x45670123UL
-#define FLASH_KEY2           0xCDEF89ABUL
-#define FLASH_SR_BSY         0x00000001UL
-#define FLASH_CTLR_LOCK_FAST 0x00008000UL
+#define FLASH_KEY1   0x45670123UL
+#define FLASH_KEY2   0xCDEF89ABUL
+#define FLASH_SR_BSY 0x00000001UL
 
 typedef union __attribute__((aligned(4))) {
     struct {
@@ -42,70 +56,58 @@ typedef union __attribute__((aligned(4))) {
         uint8_t len;
         uint8_t data[DATA_BUF_SIZE];
     } uart;
-    struct {
-        uint8_t raw[DATA_BUF_SIZE + 4U];
-    } other;
 } isp_cmd_t;
 
-static uint32_t g_program_addr = APP_FLASH_BASE;
-static uint32_t g_verify_addr = APP_FLASH_BASE;
-static uint8_t g_verify_started = 0U;
-static uint8_t g_fast_program_buf[390] __attribute__((aligned(4)));
+static uint32_t g_program_addr  = APP_FLASH_BASE;
+static uint32_t g_verify_addr   = APP_FLASH_BASE;
+static uint8_t  g_verify_started = 0U;
+static uint8_t  g_fast_program_buf[390] __attribute__((aligned(4)));
 static uint32_t g_program_buf[64];
 static uint16_t g_code_len = 0U;
-static uint8_t g_end_flag = 0U;
-static uint8_t g_ep_rx_buffer[DATA_BUF_SIZE + 4U] __attribute__((aligned(4)));
+static uint8_t  g_end_flag = 0U;
+static uint8_t  g_ep_rx_buffer[DATA_BUF_SIZE + 4U] __attribute__((aligned(4)));
 
 #define ISP_CMD ((isp_cmd_t *)g_ep_rx_buffer)
 
+static void iap_to_app(void);
+
 static void delay_cycles(volatile uint32_t cycles)
 {
-    while (cycles-- != 0U) { }
+    while (cycles-- != 0U) {}
 }
 
-static void leds_init(void)
+static void led_init(void)
 {
-    RCC->PB2PCENR |= RCC_PB2Periph_GPIOC;
-    GPIOC->CFGLR &= ~((uint32_t)0xFF000000);
-    GPIOC->CFGLR |= (uint32_t)0x33000000;
-    GPIOC->BCR = (uint32_t)(LED_ERR_PIN | LED_ACT_PIN);
+    RCC->PB2PCENR |= RCC_PB2Periph_GPIOD;
+    /* PD0 = push-pull output 50 MHz */
+    GPIOD->CFGLR = (GPIOD->CFGLR & ~0xFUL) | 0x3UL;
+    GPIOD->BCR = LED_PIN;
 }
 
-static void led_err_set(uint8_t on)
+static void led_set(uint8_t on)
 {
-    if (on) GPIOC->BSHR = LED_ERR_PIN;
-    else GPIOC->BCR = LED_ERR_PIN;
-}
-
-static void led_act_set(uint8_t on)
-{
-    if (on) GPIOC->BSHR = LED_ACT_PIN;
-    else GPIOC->BCR = LED_ACT_PIN;
+    if (on) GPIOD->BSHR = LED_PIN;
+    else    GPIOD->BCR  = LED_PIN;
 }
 
 static void rs485_set_tx(uint8_t en)
 {
     if (en) GPIOD->BSHR = RS485_DE_PIN;
-    else GPIOD->BCR = RS485_DE_PIN;
+    else    GPIOD->BCR  = RS485_DE_PIN;
 }
 
 static void usart1_cfg_rs485(void)
 {
     RCC->PB2PCENR |= RCC_PB2Periph_GPIOD | RCC_PB2Periph_AFIO | RCC_PB2Periph_USART1;
     GPIO_PinRemapConfig(GPIO_PartialRemap1_USART1, ENABLE);
-    /* PD6 = USART1 TX (AF_PP), PD5 = USART1 RX (input floating), PD4 = RS485 DE (out PP). */
-    GPIOD->CFGLR = 0x4B434444U;
+    /* PD0 = preserved (LED out), PD1-3 = float in,
+       PD4 = PP out (RS485 DE), PD5 = float in (RX), PD6 = AF PP (TX), PD7 = float in */
+    GPIOD->CFGLR = (GPIOD->CFGLR & 0x0000000FUL) | 0x4B434440UL;
     rs485_set_tx(0U);
     USART1->CTLR2 |= USART_StopBits_1;
-    USART1->CTLR1 = 0x200CU;
-    USART1->CTLR3 = USART_HardwareFlowControl_None;
-#if IAP_UART_BAUD == 460800U
-    USART1->BRR = (SystemCoreClock == 24000000U) ? 0x34U : 0x68U;
-#elif IAP_UART_BAUD == 115200U
-    USART1->BRR = (SystemCoreClock == 24000000U) ? 0xD0U : 0x1A0U;
-#else
-#error Unsupported IAP_UART_BAUD
-#endif
+    USART1->CTLR1  = 0x200CU;
+    USART1->CTLR3  = USART_HardwareFlowControl_None;
+    USART1->BRR    = (SystemCoreClock == 24000000U) ? 0xD0U : 0x1A0U;
     USART1->CTLR1 |= 0x2000U;
 }
 
@@ -116,28 +118,31 @@ static void rs485_send_bytes(const uint8_t *buf, uint8_t len)
     rs485_set_tx(1U);
     delay_cycles(200U);
     for (i = 0; i < len; i++) {
-        while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET) { }
+        while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET) {}
         USART_SendData(USART1, buf[i]);
     }
-    while (USART_GetFlagStatus(USART1, USART_FLAG_TC) == RESET) { }
+    while (USART_GetFlagStatus(USART1, USART_FLAG_TC) == RESET) {}
     rs485_set_tx(0U);
 }
 
-static void send_status_frame(uint8_t err)
+/* Fixed 7-byte response: AA 55 DEV_ADDR ERR EXT 55 AA
+   EXT = DEVICE_TYPE for CMD_SCAN, 0x00 otherwise. */
+static void send_resp(uint8_t err, uint8_t ext)
 {
-    uint8_t resp[6];
+    uint8_t resp[7];
     resp[0] = UART_SYNC_HEAD1;
     resp[1] = UART_SYNC_HEAD2;
-    resp[2] = 0x00U;
+    resp[2] = DEVICE_ADDR;
     resp[3] = err;
-    resp[4] = UART_SYNC_HEAD2;
-    resp[5] = UART_SYNC_HEAD1;
+    resp[4] = ext;
+    resp[5] = UART_SYNC_HEAD2;
+    resp[6] = UART_SYNC_HEAD1;
     rs485_send_bytes(resp, sizeof(resp));
 }
 
 static uint8_t uart1_rx_blocking(void)
 {
-    while (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) == RESET) { }
+    while (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) == RESET) {}
     return (uint8_t)(USART_ReceiveData(USART1) & 0xFFU);
 }
 
@@ -145,29 +150,25 @@ static void program_buf_modify(void)
 {
     uint8_t i;
     for (i = 0; i < 64U; i++) {
-        if (i != 63U) {
-            g_program_buf[i] = *(uint32_t *)((IAP_CAL_ADDR & 0xFFFFFF00UL) + (4UL * i));
-        } else {
-            g_program_buf[i] = IAP_CHECK_NUM;
-        }
+        g_program_buf[i] = (i != 63U)
+            ? *(uint32_t *)((IAP_CAL_ADDR & 0xFFFFFF00UL) + (4UL * i))
+            : IAP_CHECK_NUM;
     }
 }
 
 static void flash_unlock_fast_local(void)
 {
-    FLASH->KEYR = FLASH_KEY1;
-    FLASH->KEYR = FLASH_KEY2;
-    FLASH->MODEKEYR = FLASH_KEY1;
-    FLASH->MODEKEYR = FLASH_KEY2;
+    FLASH->KEYR    = FLASH_KEY1; FLASH->KEYR    = FLASH_KEY2;
+    FLASH->MODEKEYR = FLASH_KEY1; FLASH->MODEKEYR = FLASH_KEY2;
 }
 
 static void flash_erase_page_fast_local(uint32_t page_address)
 {
     FLASH->CTLR &= ~((uint32_t)(FLASH_CTLR_PAGE_ER | FLASH_CTLR_PAGE_PG));
     FLASH->CTLR |= FLASH_CTLR_PAGE_ER;
-    FLASH->ADDR = page_address & 0xFFFFFF00UL;
+    FLASH->ADDR  = page_address & 0xFFFFFF00UL;
     FLASH->CTLR |= FLASH_CTLR_STRT;
-    while ((FLASH->STATR & FLASH_SR_BSY) != 0U) { }
+    while ((FLASH->STATR & FLASH_SR_BSY) != 0U) {}
     FLASH->CTLR &= ~FLASH_CTLR_PAGE_ER;
 }
 
@@ -179,43 +180,30 @@ static void flash_erase_all_pages_local(void)
     }
 }
 
-static void system_reset_start_mode_local(uint32_t mode)
-{
-    FLASH->KEYR = FLASH_KEY1;
-    FLASH->KEYR = FLASH_KEY2;
-    FLASH->BOOT_MODEKEYR = FLASH_KEY1;
-    FLASH->BOOT_MODEKEYR = FLASH_KEY2;
-    FLASH->STATR &= ~(1UL << 14);
-    if (mode != 0U) {
-        FLASH->STATR |= (1UL << 14);
-    }
-    FLASH->CTLR |= FLASH_CTLR_LOCK;
-}
 
 static void ch32_iap_program(uint32_t adr, uint32_t *buf)
 {
     uint8_t j;
-
     adr &= 0xFFFFFF00UL;
 
-    FLASH->CTLR |= ((uint32_t)0x00010000);
-    FLASH->CTLR |= ((uint32_t)0x00080000);
-    while ((FLASH->STATR & ((uint32_t)0x00000001)) != 0U) { }
-    FLASH->CTLR &= ~((uint32_t)0x00010000);
+    FLASH->CTLR |= 0x00010000UL;
+    FLASH->CTLR |= 0x00080000UL;
+    while ((FLASH->STATR & 0x00000001UL) != 0U) {}
+    FLASH->CTLR &= ~0x00010000UL;
 
     for (j = 0; j < 64U; j++) {
-        FLASH->CTLR |= ((uint32_t)0x00010000);
+        FLASH->CTLR |= 0x00010000UL;
         *(__IO uint32_t *)(adr + 4UL * j) = buf[j];
-        FLASH->CTLR |= ((uint32_t)0x00040000);
-        while ((FLASH->STATR & ((uint32_t)0x00000001)) != 0U) { }
-        FLASH->CTLR &= ~((uint32_t)0x00010000);
+        FLASH->CTLR |= 0x00040000UL;
+        while ((FLASH->STATR & 0x00000001UL) != 0U) {}
+        FLASH->CTLR &= ~0x00010000UL;
     }
 
-    FLASH->CTLR |= ((uint32_t)0x00010000);
-    FLASH->ADDR = adr;
-    FLASH->CTLR |= ((uint32_t)0x00000040);
-    while ((FLASH->STATR & ((uint32_t)0x00000001)) != 0U) { }
-    FLASH->CTLR &= ~((uint32_t)0x00010000);
+    FLASH->CTLR |= 0x00010000UL;
+    FLASH->ADDR  = adr;
+    FLASH->CTLR |= 0x00000040UL;
+    while ((FLASH->STATR & 0x00000001UL) != 0U) {}
+    FLASH->CTLR &= ~0x00010000UL;
 }
 
 static uint8_t rec_data_deal(void)
@@ -258,7 +246,6 @@ static uint8_t rec_data_deal(void)
                 g_code_len = 0U;
             }
         }
-
         s = ERR_SUCCESS;
         for (i = 0U; i < length; i++) {
             if (ISP_CMD->uart.data[i] != *(uint8_t *)(g_verify_addr + i)) {
@@ -273,18 +260,18 @@ static uint8_t rec_data_deal(void)
         g_verify_started = 0U;
         g_end_flag = 1U;
         g_program_addr = APP_FLASH_BASE;
-        g_verify_addr = APP_FLASH_BASE;
-        s = ERR_END;
+        g_verify_addr  = APP_FLASH_BASE;
 
         flash_erase_page_fast_local(IAP_CAL_ADDR & 0xFFFFFF00UL);
         program_buf_modify();
         ch32_iap_program(IAP_CAL_ADDR & 0xFFFFFF00UL, g_program_buf);
 
-        FLASH->CTLR |= ((uint32_t)0x00008000);
-        FLASH->CTLR |= ((uint32_t)0x00000080);
+        FLASH->CTLR |= 0x00008000UL;
+        FLASH->CTLR |= 0x00000080UL;
+        s = ERR_SUCCESS;
         break;
 
-    case CMD_JUMP_IAP:
+    case CMD_JUMP_APP:
         s = ERR_SUCCESS;
         break;
 
@@ -292,7 +279,6 @@ static uint8_t rec_data_deal(void)
         s = ERR_ERROR;
         break;
     }
-
     return s;
 }
 
@@ -300,26 +286,23 @@ static void uart_rx_deal(void)
 {
     uint8_t i;
     uint8_t s;
+    uint8_t dest;
     uint16_t data_add = 0U;
 
     if (uart1_rx_blocking() != UART_SYNC_HEAD1) return;
     if (uart1_rx_blocking() != UART_SYNC_HEAD2) return;
+
+    dest = uart1_rx_blocking();
+    data_add = dest;
+
+    if (dest != DEVICE_ADDR && dest != BROADCAST_ADDR) return;
 
     ISP_CMD->uart.cmd = uart1_rx_blocking();
     data_add = (uint16_t)(data_add + ISP_CMD->uart.cmd);
     ISP_CMD->uart.len = uart1_rx_blocking();
     data_add = (uint16_t)(data_add + ISP_CMD->uart.len);
 
-    if (ISP_CMD->uart.cmd == CMD_IAP_ERASE || ISP_CMD->uart.cmd == CMD_IAP_VERIFY) {
-        ISP_CMD->other.raw[2] = uart1_rx_blocking();
-        data_add = (uint16_t)(data_add + ISP_CMD->other.raw[2]);
-        ISP_CMD->other.raw[3] = uart1_rx_blocking();
-        data_add = (uint16_t)(data_add + ISP_CMD->other.raw[3]);
-        ISP_CMD->other.raw[4] = uart1_rx_blocking();
-        data_add = (uint16_t)(data_add + ISP_CMD->other.raw[4]);
-        ISP_CMD->other.raw[5] = uart1_rx_blocking();
-        data_add = (uint16_t)(data_add + ISP_CMD->other.raw[5]);
-    }
+    if (ISP_CMD->uart.len > DATA_BUF_SIZE) return;
 
     if (ISP_CMD->uart.cmd == CMD_IAP_PROM || ISP_CMD->uart.cmd == CMD_IAP_VERIFY) {
         for (i = 0U; i < ISP_CMD->uart.len; i++) {
@@ -329,59 +312,72 @@ static void uart_rx_deal(void)
     }
 
     if (uart1_rx_blocking() != (uint8_t)(data_add & 0xFFU)) return;
-    if (uart1_rx_blocking() != (uint8_t)(data_add >> 8)) return;
+    if (uart1_rx_blocking() != (uint8_t)(data_add >> 8))    return;
     if (uart1_rx_blocking() != UART_SYNC_HEAD2) return;
     if (uart1_rx_blocking() != UART_SYNC_HEAD1) return;
 
-    led_err_set(1U);
+    if (ISP_CMD->uart.cmd == CMD_SCAN) {
+        /* Stagger broadcast responses by address to avoid RS485 collision. */
+        if (dest == BROADCAST_ADDR) {
+            delay_cycles((uint32_t)DEVICE_ADDR * 96000U);
+        }
+        send_resp(ERR_SUCCESS, DEVICE_TYPE);
+        return;
+    }
+
+    led_set(1U);
     delay_cycles(2400000U);
     s = rec_data_deal();
 
-    if (s != ERR_END) {
-        send_status_frame((s == ERR_ERROR) ? 0x01U : 0x00U);
-        led_err_set(s == ERR_ERROR);
+    if (!g_end_flag) {
+        send_resp((s == ERR_ERROR) ? ERR_ERROR : ERR_SUCCESS, 0x00U);
+    }
+    led_set(s == ERR_ERROR);
+
+    if (ISP_CMD->uart.cmd == CMD_JUMP_APP && s == ERR_SUCCESS) {
+        delay_cycles(96000U);   /* let response byte leave the bus */
+        iap_to_app();
     }
 }
 
 static void iap_to_app(void)
 {
+    typedef void (*fn_t)(void);
+    /* Clear BOOT_MODE so the chip boots from user flash (0x08000000) on every
+       subsequent power-on or reset.  CMD_ENTER_BOOT sets Start_Mode_BOOT
+       (FLASH_STATR bit14=1); without clearing it here the WCH ROM would run
+       on the next power-on and the app would never start. */
+    FLASH->KEYR          = FLASH_KEY1;
+    FLASH->KEYR          = FLASH_KEY2;
+    FLASH->BOOT_MODEKEYR = FLASH_KEY1;
+    FLASH->BOOT_MODEKEYR = FLASH_KEY2;
+    FLASH->STATR        &= ~(uint32_t)FLASH_STATR_BOOT_MODE;
+    FLASH->CTLR         |= 0x80U;   /* re-lock */
     RCC_ClearFlag();
-    system_reset_start_mode_local(0U);
-    NVIC_SystemReset();
-}
-
-static uint8_t app_is_present(void)
-{
-    return (*(uint32_t *)APP_FLASH_BASE != 0xFFFFFFFFUL) ? 1U : 0U;
-}
-
-static uint8_t boot_mode_requested(void)
-{
-    return (RCC_GetFlagStatus(RCC_FLAG_SFTRST) == SET) ? 1U : 0U;
+    ((fn_t)APP_FLASH_BASE)();
 }
 
 int main(void)
 {
     SystemCoreClockUpdate();
-    leds_init();
+    led_init();
     usart1_cfg_rs485();
-    led_act_set(1U);
+    led_set(1U);
 
-    /* Boot the user app by default on power-on/pin reset.
-       Stay in IAP only when the app explicitly entered BOOT mode via software reset. */
-    if (app_is_present() && !boot_mode_requested()) {
+    /* Boot app only if: valid magic word written by CMD_IAP_END AND power-on reset. */
+    if ((*(uint32_t *)IAP_CAL_ADDR == IAP_CHECK_NUM) &&
+        (RCC_GetFlagStatus(RCC_FLAG_SFTRST) == RESET)) {
         iap_to_app();
-        while (1) { }
+        while (1) {}
     }
 
     while (1) {
         if (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) == SET) {
             uart_rx_deal();
         }
-
         if (g_end_flag != 0U) {
             iap_to_app();
-            while (1) { }
+            while (1) {}
         }
     }
 }

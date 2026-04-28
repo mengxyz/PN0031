@@ -1,0 +1,102 @@
+    ~/Doc/Ar/p/PN0031   main !15 ?12  python3 ./tools/ch32v006_rs485_iap.py --port /dev/tty.wchusbser
+ial5B7A1539961 --debug scan
+scanning bus on /dev/tty.wchusbserial5B7A1539961 (collect=1.5s)...
+TX AA55FF0100000155AA
+RX AA5501000155AA
+found 1 device(s):
+  addr=0x01  type=0x01 (rewinder)
+    ~/Doc/Ar/p/PN0031   main !15 ?12  python3 tools/ch32v006_rs485_iap.py --port /dev/tty.wchusbseria
+l5B7A1539961 --addr 0x01 --progress upload app/ch32_v006_rewinder/.pio/build/rs485_echo_test/firmware.bin
+erase addr=0x01 image_len=2796
+erase_ack_ms=627.34
+program 64/2796 page=0x0000 chunk=1/4 try=1 ack_ms=632.81
+program 128/2796 page=0x0000 chunk=2/4 try=1 ack_ms=633.02
+program 192/2796 page=0x0000 chunk=3/4 try=1 ack_ms=633.18
+program 256/2796 page=0x0000 chunk=4/4 try=1 ack_ms=634.47
+verify  64/2796 page=0x0000 chunk=1/4 try=1 ack_ms=632.97
+verify  128/2796 page=0x0000 chunk=2/4 try=1 ack_ms=633.29
+verify  192/2796 page=0x0000 chunk=3/4 try=1 ack_ms=633.18
+verify  256/2796 page=0x0000 chunk=4/4 try=1 ack_ms=633.01
+program 320/2796 page=0x0100 chunk=1/4 try=1 ack_ms=632.95
+program 384/2796 page=0x0100 chunk=2/4 try=1 ack_ms=632.72
+program 448/2796 page=0x0100 chunk=3/4 try=1 ack_ms=633.16
+program 512/2796 page=0x0100 chunk=4/4 try=1 ack_ms=634.62
+verify  320/2796 page=0x0100 chunk=1/4 try=1 ack_ms=633.02
+verify  384/2796 page=0x0100 chunk=2/4 try=1 ack_ms=633.02
+verify  448/2796 page=0x0100 chunk=3/4 try=1 ack_ms=632.48
+verify  512/2796 page=0x0100 chunk=4/4 try=1 ack_ms=632.73
+program 576/2796 page=0x0200 chunk=1/4 try=1 ack_ms=633.00
+program 640/2796 page=0x0200 chunk=2/4 try=1 ack_ms=632.61
+program 704/2796 page=0x0200 chunk=3/4 try=1 ack_ms=632.82
+program 768/2796 page=0x0200 chunk=4/4 try=1 ack_ms=634.75
+verify  576/2796 page=0x0200 chunk=1/4 try=1 ack_ms=633.05
+verify  640/2796 page=0x0200 chunk=2/4 try=1 ack_ms=633.12
+verify  704/2796 page=0x0200 chunk=3/4 try=1 ack_ms=632.77
+verify  768/2796 page=0x0200 chunk=4/4 try=1 ack_ms=632.93
+program 832/2796 page=0x0300 chunk=1/4 try=1 ack_ms=633.23
+program 896/2796 page=0x0300 chunk=2/4 try=1 ack_ms=633.06
+program 960/2796 page=0x0300 chunk=3/4 try=1 ack_ms=632.97
+program 1024/2796 page=0x0300 chunk=4/4 try=1 ack_ms=634.79
+verify  832/2796 page=0x0300 chunk=1/4 try=1 ack_ms=633.14
+verify  896/2796 page=0x0300 chunk=2/4 try=1 ack_ms=632.94
+verify  960/2796 page=0x0300 chunk=3/4 try=1 ack_ms=633.27
+verify  1024/2796 page=0x0300 chunk=4/4 try=1 ack_ms=632.85
+program 1088/2796 page=0x0400 chunk=1/4 try=1 ack_ms=632.60
+program 1152/2796 page=0x0400 chunk=2/4 try=1 ack_ms=632.96
+program 1216/2796 page=0x0400 chunk=3/4 try=1 ack_ms=633.17
+program 1280/2796 page=0x0400 chunk=4/4 try=1 ack_ms=635.12
+verify  1088/2796 page=0x0400 chunk=1/4 try=1 ack_ms=633.27
+verify  1152/2796 page=0x0400 chunk=2/4 try=1 ack_ms=633.22
+verify  1216/2796 page=0x0400 chunk=3/4 try=1 ack_ms=633.11
+verify  1280/2796 page=0x0400 chunk=4/4 try=1 ack_ms=632.96
+program 1344/2796 page=0x0500 chunk=1/4 try=1 ack_ms=633.37
+program 1408/2796 page=0x0500 chunk=2/4 try=1 ack_ms=633.22
+program 1472/2796 page=0x0500 chunk=3/4 try=1 ack_ms=633.33
+program 1536/2796 page=0x0500 chunk=4/4 try=1 ack_ms=634.93
+verify  1344/2796 page=0x0500 chunk=1/4 try=1 ack_ms=633.36
+verify  1408/2796 page=0x0500 chunk=2/4 try=1 ack_ms=633.29
+verify  1472/2796 page=0x0500 chunk=3/4 try=1 ack_ms=633.51
+verify  1536/2796 page=0x0500 chunk=4/4 try=1 ack_ms=633.39
+program 1600/2796 page=0x0600 chunk=1/4 try=1 ack_ms=633.50
+program 1664/2796 page=0x0600 chunk=2/4 try=1 ack_ms=633.47
+program 1728/2796 page=0x0600 chunk=3/4 try=1 ack_ms=633.10
+program 1792/2796 page=0x0600 chunk=4/4 try=1 ack_ms=635.02
+verify  1600/2796 page=0x0600 chunk=1/4 try=1 ack_ms=633.48
+verify  1664/2796 page=0x0600 chunk=2/4 try=1 ack_ms=632.93
+verify  1728/2796 page=0x0600 chunk=3/4 try=1 ack_ms=632.85
+verify  1792/2796 page=0x0600 chunk=4/4 try=1 ack_ms=633.21
+program 1856/2796 page=0x0700 chunk=1/4 try=1 ack_ms=632.98
+program 1920/2796 page=0x0700 chunk=2/4 try=1 ack_ms=632.87
+program 1984/2796 page=0x0700 chunk=3/4 try=1 ack_ms=633.25
+program 2048/2796 page=0x0700 chunk=4/4 try=1 ack_ms=635.02
+verify  1856/2796 page=0x0700 chunk=1/4 try=1 ack_ms=632.93
+verify  1920/2796 page=0x0700 chunk=2/4 try=1 ack_ms=632.81
+verify  1984/2796 page=0x0700 chunk=3/4 try=1 ack_ms=632.92
+verify  2048/2796 page=0x0700 chunk=4/4 try=1 ack_ms=632.94
+program 2112/2796 page=0x0800 chunk=1/4 try=1 ack_ms=632.73
+program 2176/2796 page=0x0800 chunk=2/4 try=1 ack_ms=633.01
+program 2240/2796 page=0x0800 chunk=3/4 try=1 ack_ms=632.85
+program 2304/2796 page=0x0800 chunk=4/4 try=1 ack_ms=634.49
+verify  2112/2796 page=0x0800 chunk=1/4 try=1 ack_ms=633.14
+verify  2176/2796 page=0x0800 chunk=2/4 try=1 ack_ms=633.17
+verify  2240/2796 page=0x0800 chunk=3/4 try=1 ack_ms=633.12
+verify  2304/2796 page=0x0800 chunk=4/4 try=1 ack_ms=633.61
+program 2368/2796 page=0x0900 chunk=1/4 try=1 ack_ms=633.19
+program 2432/2796 page=0x0900 chunk=2/4 try=1 ack_ms=633.39
+program 2496/2796 page=0x0900 chunk=3/4 try=1 ack_ms=632.98
+program 2560/2796 page=0x0900 chunk=4/4 try=1 ack_ms=634.55
+verify  2368/2796 page=0x0900 chunk=1/4 try=1 ack_ms=633.05
+verify  2432/2796 page=0x0900 chunk=2/4 try=1 ack_ms=632.94
+verify  2496/2796 page=0x0900 chunk=3/4 try=1 ack_ms=633.83
+verify  2560/2796 page=0x0900 chunk=4/4 try=1 ack_ms=632.76
+program 2624/2796 page=0x0A00 chunk=1/4 try=1 ack_ms=632.88
+program 2688/2796 page=0x0A00 chunk=2/4 try=1 ack_ms=632.97
+program 2752/2796 page=0x0A00 chunk=3/4 try=1 ack_ms=633.29
+program 2796/2796 page=0x0A00 chunk=4/4 try=1 ack_ms=634.56
+verify  2624/2796 page=0x0A00 chunk=1/4 try=1 ack_ms=632.62
+verify  2688/2796 page=0x0A00 chunk=2/4 try=1 ack_ms=632.59
+verify  2752/2796 page=0x0A00 chunk=3/4 try=1 ack_ms=632.43
+verify  2796/2796 page=0x0A00 chunk=4/4 try=1 ack_ms=630.99
+end
+end_wait_ms=304.62
+done
