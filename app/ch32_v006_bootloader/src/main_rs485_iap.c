@@ -13,6 +13,7 @@
 
 #define RS485_DE_PORT GPIOD
 #define RS485_DE_PIN  GPIO_Pin_4
+#define FORCE_IAP_PIN GPIO_Pin_1  /* PD1/SWIO: hold low at reset to stay in IAP */
 
 /* Single status LED on PD0. */
 #define LED_PORT GPIOD
@@ -138,6 +139,16 @@ static void send_resp(uint8_t err, uint8_t ext)
     resp[5] = UART_SYNC_HEAD2;
     resp[6] = UART_SYNC_HEAD1;
     rs485_send_bytes(resp, sizeof(resp));
+}
+
+static uint8_t force_iap_pin_low(void)
+{
+    RCC->PB2PCENR |= RCC_PB2Periph_GPIOD;
+    /* PD1 input pull-up: MODE=00, CNF=10, ODR=1. */
+    GPIOD->CFGLR = (GPIOD->CFGLR & ~(0xFUL << 4)) | (0x8UL << 4);
+    GPIOD->BSHR = FORCE_IAP_PIN;
+    delay_cycles(1000U);
+    return (GPIOD->INDR & FORCE_IAP_PIN) == 0U;
 }
 
 static uint8_t uart1_rx_blocking(void)
@@ -355,13 +366,16 @@ static void iap_to_app(void)
 
 int main(void)
 {
+    uint8_t force_iap;
     SystemCoreClockUpdate();
     led_init();
     usart1_cfg_rs485();
     led_set(1U);
+    force_iap = force_iap_pin_low();
 
     /* Boot app only if: valid magic word written by CMD_IAP_END AND power-on reset. */
-    if ((*(uint32_t *)IAP_CAL_ADDR == IAP_CHECK_NUM) &&
+    if (!force_iap &&
+        (*(uint32_t *)IAP_CAL_ADDR == IAP_CHECK_NUM) &&
         (RCC_GetFlagStatus(RCC_FLAG_SFTRST) == RESET)) {
         iap_to_app();
         while (1) {}
