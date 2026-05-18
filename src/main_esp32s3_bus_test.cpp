@@ -34,6 +34,26 @@ static void dump_hex(const uint8_t *data, size_t len) {
   }
 }
 
+static void print_device_info(const CH32BusHost::DeviceInfo &info) {
+  Serial.print("status=");
+  Serial.print(status_name(info.status));
+  Serial.print(" type=0x");
+  if (info.deviceType < 0x10U) Serial.print('0');
+  Serial.print(info.deviceType, HEX);
+  Serial.print(" addr=0x");
+  if (info.deviceAddr < 0x10U) Serial.print('0');
+  Serial.print(info.deviceAddr, HEX);
+  Serial.print(" version=");
+  Serial.print(info.versionMajor);
+  Serial.print('.');
+  Serial.print(info.versionMinor);
+  Serial.print('.');
+  Serial.print(info.versionPatch);
+  Serial.print(" uid=");
+  dump_hex(info.uid, sizeof(info.uid));
+  Serial.println();
+}
+
 static int hex_nibble(char c) {
   if (c >= '0' && c <= '9') return c - '0';
   if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
@@ -59,12 +79,15 @@ static void print_help() {
   Serial.println("Commands:");
   Serial.println("  p        ping");
   Serial.println("  v        version");
+  Serial.println("  i        device info");
+  Serial.println("  d        discover");
+  Serial.println("  h        heartbeat listen");
+  Serial.println("  k        host heartbeat keepalive");
   Serial.println("  u1..u4   read uid");
   Serial.println("  f1..f4   read filament");
   Serial.println("  s        get switch status");
-  Serial.println("  1f..4f   motor forward");
-  Serial.println("  1r..4r   motor reverse");
-  Serial.println("  1s..4s   motor stop");
+  Serial.println("  m1 128   motor channel 1 speed 128");
+  Serial.println("  m1 0     motor channel 1 stop");
   Serial.println("  b        enter boot");
   Serial.println("  fwi      firmware info");
   Serial.println("  fws      filesystem status");
@@ -74,6 +97,58 @@ static void print_help() {
   Serial.println("  fwb N    begin USB firmware upload (size bytes)");
   Serial.println("  fwc HEX  append firmware chunk");
   Serial.println("  fwe      finish USB firmware upload");
+}
+
+static void cmd_device_info() {
+  CH32BusHost::DeviceInfo info;
+  if (!g_host.getVersion(info)) {
+    Serial.println(g_host.lastError());
+    return;
+  }
+  print_device_info(info);
+}
+
+static void cmd_discover() {
+  CH32BusHost::DeviceInfo devices[8];
+  size_t count = 0;
+  if (!g_host.discover(devices, 8, count)) {
+    Serial.println(g_host.lastError());
+    return;
+  }
+  Serial.print("devices=");
+  Serial.println((unsigned long)count);
+  for (size_t i = 0; i < count; ++i) {
+    Serial.print("  ");
+    print_device_info(devices[i]);
+  }
+}
+
+static void cmd_heartbeat() {
+  CH32BusHost::HeartbeatInfo hb;
+  if (!g_host.readHeartbeat(hb, 5000)) {
+    Serial.println(g_host.lastError());
+    return;
+  }
+  Serial.print("heartbeat addr=0x");
+  if (hb.deviceAddr < 0x10U) Serial.print('0');
+  Serial.print(hb.deviceAddr, HEX);
+  Serial.print(" type=0x");
+  if (hb.deviceType < 0x10U) Serial.print('0');
+  Serial.print(hb.deviceType, HEX);
+  Serial.print(" reported_addr=0x");
+  if (hb.reportedAddr < 0x10U) Serial.print('0');
+  Serial.println(hb.reportedAddr, HEX);
+}
+
+static void cmd_keepalive() {
+  uint8_t st;
+  if (!g_host.sendHeartbeat(&st)) {
+    Serial.print("NO_CONNECTION lost host heartbeat ack: ");
+    Serial.println(g_host.lastError());
+    return;
+  }
+  Serial.print("heartbeat_ack status=");
+  Serial.println(status_name(st));
 }
 
 static void cmd_ping() {
@@ -161,9 +236,9 @@ static void cmd_switch() {
   Serial.println(sw.onlineMask, HEX);
 }
 
-static void cmd_motor(uint8_t ch, uint8_t action) {
+static void cmd_motor(uint8_t ch, uint8_t speed) {
   uint8_t st;
-  if (!g_host.motorCtrl(ch, action, &st)) {
+  if (!g_host.motorCtrl(ch, speed, &st)) {
     Serial.println(g_host.lastError());
     return;
   }
@@ -171,11 +246,8 @@ static void cmd_motor(uint8_t ch, uint8_t action) {
   Serial.print(status_name(st));
   Serial.print(" channel=");
   Serial.print(ch);
-  Serial.print(" action=");
-  if (action == 0x00U) Serial.println("stop");
-  else if (action == 0x01U) Serial.println("forward");
-  else if (action == 0x02U) Serial.println("reverse");
-  else Serial.println("unknown");
+  Serial.print(" speed=");
+  Serial.println(speed);
 }
 
 static void cmd_enter_boot() {
@@ -282,6 +354,7 @@ void setup() {
   delay(300);
   LittleFS.begin(true);
   g_host.begin(Serial1, BUS_RX_PIN, BUS_TX_PIN, BUS_BAUD, IAP_BAUD, BUS_DIR_PIN);
+  g_host.setDeviceAddress(0x01);
   g_host.attachFilesystem(LittleFS);
   g_host.attachFilesystemStats(littlefs_total_bytes, littlefs_used_bytes);
   Serial.println("esp32s3 bus test");
@@ -300,6 +373,10 @@ void loop() {
 
   if (cmd == "p") cmd_ping();
   else if (cmd == "v") cmd_version();
+  else if (cmd == "i") cmd_device_info();
+  else if (cmd == "d" || cmd == "discover") cmd_discover();
+  else if (cmd == "h" || cmd == "heartbeat listen") cmd_heartbeat();
+  else if (cmd == "k") cmd_keepalive();
   else if (cmd == "s") cmd_switch();
   else if (cmd == "b") cmd_enter_boot();
   else if (cmd == "fwi") cmd_fw_info();
@@ -312,10 +389,13 @@ void loop() {
   else if (cmd.startsWith("fwc ")) cmd_fw_chunk(cmd.substring(4));
   else if (cmd.length() == 2 && cmd[0] == 'u' && cmd[1] >= '1' && cmd[1] <= '4') cmd_uid((uint8_t)(cmd[1] - '0'));
   else if (cmd.length() == 2 && cmd[0] == 'f' && cmd[1] >= '1' && cmd[1] <= '4') cmd_filament((uint8_t)(cmd[1] - '0'));
-  else if (cmd.length() == 2 && cmd[0] >= '1' && cmd[0] <= '4' && (cmd[1] == 'f' || cmd[1] == 'r' || cmd[1] == 's')) {
-    uint8_t ch = (uint8_t)(cmd[0] - '0');
-    uint8_t action = (cmd[1] == 'f') ? 0x01U : ((cmd[1] == 'r') ? 0x02U : 0x00U);
-    cmd_motor(ch, action);
+  else if (cmd.length() >= 4 && cmd[0] == 'm' && cmd[1] >= '1' && cmd[1] <= '4' && cmd[2] == ' ') {
+    int speed = cmd.substring(3).toInt();
+    if (speed < 0 || speed > 255) {
+      Serial.println("ERR speed_range");
+    } else {
+      cmd_motor((uint8_t)(cmd[1] - '0'), (uint8_t)speed);
+    }
   } else {
     print_help();
   }
