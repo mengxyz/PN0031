@@ -374,6 +374,7 @@ static void motor_set_speed(uint8_t ch_1to4, uint8_t speed)
         motor_apply_ccr(ch_1to4, g_motor_ccr[idx]);
     }
     argb_update_motors();
+    argb_flush();
 }
 
 static void motor_ramp_task(void)
@@ -867,6 +868,8 @@ static void bus_handle_cmd(uint8_t dest, uint8_t cmd, uint8_t seq,
 static void bus_housekeeping(void)
 {
     if (g_registered && (g_tick - g_last_host_tick) >= HOST_TIMEOUT_MS) {
+        uint8_t ch;
+        for (ch = 1U; ch <= 4U; ch++) motor_set_speed(ch, 0U);
         g_registered = 0U;
         g_hb_led_on = 0U;
         led_set(false);
