@@ -4,7 +4,7 @@
 
 static const uint32_t USB_BAUD = 115200;
 static const uint32_t BUS_BAUD = 460800;
-static const uint32_t IAP_BAUD = 115200;
+static const uint32_t IAP_BAUD = 460800;
 static const int BUS_RX_PIN = 44;
 static const int BUS_TX_PIN = 43;
 static const int BUS_DIR_PIN = -1;
@@ -90,6 +90,7 @@ static void print_help() {
   Serial.println("  m1 0     motor channel 1 stop");
   Serial.println("  b        enter boot");
   Serial.println("  fwi      firmware info");
+  Serial.println("  fwr O N  read stored firmware chunk");
   Serial.println("  fws      filesystem status");
   Serial.println("  fwx      delete stored firmware");
   Serial.println("  fwp      IAP probe");
@@ -271,6 +272,30 @@ static void cmd_fw_info() {
   Serial.println((unsigned long)size);
 }
 
+static void cmd_fw_read(const String &args) {
+  int sep = args.indexOf(' ');
+  if (sep <= 0) {
+    Serial.println("ERR bad_args");
+    return;
+  }
+  size_t offset = (size_t)strtoul(args.substring(0, sep).c_str(), nullptr, 0);
+  size_t len = (size_t)strtoul(args.substring(sep + 1).c_str(), nullptr, 0);
+  if (len > 128U) {
+    Serial.println("ERR len_range");
+    return;
+  }
+  uint8_t buf[128];
+  size_t got = 0;
+  if (!g_host.firmwareRead(offset, buf, len, got)) {
+    Serial.print("ERR ");
+    Serial.println(g_host.lastError());
+    return;
+  }
+  Serial.print("OK data ");
+  dump_hex(buf, got);
+  Serial.println();
+}
+
 static void cmd_fs_status() {
   size_t total, used, free_bytes;
   if (!g_host.filesystemStatus(total, used, free_bytes)) {
@@ -380,6 +405,7 @@ void loop() {
   else if (cmd == "s") cmd_switch();
   else if (cmd == "b") cmd_enter_boot();
   else if (cmd == "fwi") cmd_fw_info();
+  else if (cmd.startsWith("fwr ")) cmd_fw_read(cmd.substring(4));
   else if (cmd == "fws") cmd_fs_status();
   else if (cmd == "fwx") cmd_fw_delete();
   else if (cmd == "fwp") cmd_iap_probe();

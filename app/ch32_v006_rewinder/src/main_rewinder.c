@@ -46,7 +46,7 @@
 
 #define APP_VERSION_MAJOR 0x01U
 #define APP_VERSION_MINOR 0x01U
-#define APP_VERSION_PATCH 0x01U
+#define APP_VERSION_PATCH 0x03U
 
 #define UID_WORD0         (*(volatile uint32_t *)0x1FFFF7E8U)  /* CH32V006 ESIG_UNIID1 */
 #define UID_WORD1         (*(volatile uint32_t *)0x1FFFF7ECU)  /* CH32V006 ESIG_UNIID2 */
@@ -118,6 +118,8 @@
 #define MOTOR_START_DUTY 200U
 #define MOTOR_RAMP_STEP  40U
 #define MOTOR_RAMP_MS    10U
+#define PCF_SWITCH_POLL_ENABLE 0U
+#define PCF_POLL_MS      20U
 
 /* ------------------------------------------------------------------ */
 /* Types                                                                */
@@ -144,7 +146,6 @@ typedef struct {
 /* Global state                                                         */
 /* ------------------------------------------------------------------ */
 static volatile uint32_t g_tick = 0U;
-static volatile uint8_t  g_pcf_irq = 0U;
 static volatile uint8_t  g_registered = 0U;
 static volatile uint32_t g_last_host_tick = 0U;
 #define HOST_TIMEOUT_MS  5000U
@@ -157,6 +158,7 @@ static volatile uint32_t g_argb[ARGB_LED_COUNT];    /* packed 0x00RRGGBB, sent a
 static uint16_t          g_led_rx_ticks = 0U;
 static uint32_t          g_last_hb_tick = 0U;
 static uint32_t          g_last_motor_ramp_tick = 0U;
+static uint32_t          g_last_pcf_poll_tick = 0U;
 
 /* ------------------------------------------------------------------ */
 /* Delay / SysTick                                                      */
@@ -224,6 +226,13 @@ static void argb_set(uint8_t idx, uint8_t r, uint8_t g, uint8_t b)
     g_argb[idx] = ((uint32_t)b << 16) | ((uint32_t)g << 8) | r;
 }
 
+static void argb_all_off(void)
+{
+    uint8_t i;
+    for (i = 0U; i < ARGB_LED_COUNT; i++) g_argb[i] = 0U;
+    argb_flush();
+}
+
 static void argb_update_sys(void)
 {
     /* WSGRB packing: (b<<16)|(g<<8)|r */
@@ -246,35 +255,6 @@ static void argb_update_motors(void)
 /* ------------------------------------------------------------------ */
 /* PCF8574 & switches                                                   */
 /* ------------------------------------------------------------------ */
-void EXTI7_0_IRQHandler(void)
-{
-    if ((EXTI->INTFR & EXTI_Line4) != 0U) {
-        EXTI->INTFR = EXTI_Line4;
-        g_pcf_irq = 1U;
-    }
-}
-
-static void pcf_int_init(void)
-{
-    GPIO_InitTypeDef gpio = {0};
-    NVIC_InitTypeDef nvic = {0};
-
-    RCC_PB2PeriphClockCmd(RCC_PB2Periph_GPIOC | RCC_PB2Periph_AFIO, ENABLE);
-    gpio.GPIO_Pin   = PCF8574_INT_PIN;
-    gpio.GPIO_Speed = GPIO_Speed_30MHz;
-    gpio.GPIO_Mode  = GPIO_Mode_IPU;
-    GPIO_Init(PCF8574_INT_PORT, &gpio);
-    GPIO_EXTILineConfig(GPIO_PortSourceGPIOC, GPIO_PinSource4);
-    EXTI->INTENR |= EXTI_Line4;
-    EXTI->FTENR  |= EXTI_Line4;
-    EXTI->INTFR   = EXTI_Line4;
-    nvic.NVIC_IRQChannel                   = EXTI7_0_IRQn;
-    nvic.NVIC_IRQChannelPreemptionPriority = 0;
-    nvic.NVIC_IRQChannelSubPriority        = 0;
-    nvic.NVIC_IRQChannelCmd                = ENABLE;
-    NVIC_Init(&nvic);
-}
-
 static bool sw_is_triggered(uint8_t ch_1to4)
 {
     uint8_t bit  = (uint8_t)SW_BIT_CH(ch_1to4);
@@ -405,7 +385,8 @@ static void motor_ramp_task(void)
     }
 }
 
-/* auto-stop motors when SW switch triggers (called on PCF IRQ) */
+/* auto-stop motors when SW switch triggers */
+#if PCF_SWITCH_POLL_ENABLE
 static void motor_sw_check(void)
 {
     uint8_t ch;
@@ -419,6 +400,16 @@ static void motor_sw_check(void)
             motor_set_speed(ch, 0U);
         }
     }
+}
+#endif
+
+static void pcf_switch_task(void)
+{
+#if PCF_SWITCH_POLL_ENABLE
+    if ((g_tick - g_last_pcf_poll_tick) < PCF_POLL_MS) return;
+    g_last_pcf_poll_tick = g_tick;
+    motor_sw_check();
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -812,6 +803,7 @@ static void bus_handle_cmd(uint8_t dest, uint8_t cmd, uint8_t seq,
     }
     case CMD_ENTER_BOOT:
         if (plen != 0U) { out[0]=ST_BAD_ARG; out_len=1U; break; }
+        argb_all_off();
         FLASH_Unlock_Fast();
         FLASH_ErasePage_Fast((0x08000000UL + 62UL*1024UL - 4UL) & 0xFFFFFF00UL); /* IAP_CAL_ADDR page = 0x0800F700 */
         FLASH->CTLR |= (uint32_t)0x00008000UL;
@@ -964,21 +956,15 @@ int main(void)
     pcf8574_device_init(&g_pcf_dev, PCF8574_ADDR);
     (void)pcf8574_write_port(&g_pcf_bus, &g_pcf_dev, 0xFFU); /* all inputs */
     (void)pcf8574_refresh(&g_pcf_bus, &g_pcf_dev);
-    pcf_int_init();
 
     g_last_hb_tick = g_tick;
+    g_last_pcf_poll_tick = g_tick;
 
     while (1) {
         bus_housekeeping();
         bus_poll();
         motor_ramp_task();
-
-        if (g_pcf_irq) {
-            g_pcf_irq = 0U;
-            motor_sw_check();
-            argb_update_motors();
-            argb_flush();
-        }
+        pcf_switch_task();
 
         /* heartbeat every 1 s */
         if ((g_tick - g_last_hb_tick) >= 1000U) {

@@ -19,7 +19,6 @@ CMD_IAP_PROM   = 0x80
 CMD_IAP_ERASE  = 0x81
 CMD_IAP_VERIFY = 0x82  # legacy per-chunk verify
 CMD_IAP_END    = 0x83
-CMD_JUMP_APP   = 0x84
 CMD_IAP_CRC    = 0x85  # flush+verify: 4-byte payload [size_l size_h crc16_l crc16_h]
 
 BROADCAST_ADDR = 0xFF
@@ -31,6 +30,10 @@ DEV_TYPE_NAMES = {
     0x00: "heater",
     0x01: "rewinder",
 }
+
+
+def decode_iap_version(ext: int) -> tuple[int, int, int]:
+    return ((ext >> 4) & 0x0F, (ext >> 2) & 0x03, ext & 0x03)
 
 
 def checksum16(dest: int, cmd: int, length: int, data: bytes) -> int:
@@ -162,17 +165,6 @@ class IapClient:
             raise RuntimeError(f"cksum verify failed status=0x{err:02X}")
         return time.perf_counter() - t0
 
-    def jump_app(self) -> bool:
-        """Send CMD_JUMP_APP; returns True if bootloader had a valid app and jumped."""
-        self._send(self._build_frame(CMD_JUMP_APP))
-        try:
-            err, _ = self._read_ack(timeout=1.0)
-            return err == ERR_SUCCESS
-        except TimeoutError:
-            # No response = bootloader already jumped (expected on success too)
-            return True
-
-
 def chunks(buf: bytes, n: int):
     for i in range(0, len(buf), n):
         yield buf[i:i + n]
@@ -236,18 +228,13 @@ def cmd_scan(args):
             print("no devices found in IAP mode")
         else:
             print(f"found {len(devices)} device(s):")
-            for dev_addr, dev_type in sorted(devices):
-                type_name = DEV_TYPE_NAMES.get(dev_type, f"unknown(0x{dev_type:02X})")
-                print(f"  addr=0x{dev_addr:02X}  type=0x{dev_type:02X} ({type_name})")
-    finally:
-        cli.close()
-
-
-def cmd_jump_app(args):
-    cli = IapClient(args.port, args.baud, args.timeout, args.addr, args.debug)
-    try:
-        ok = cli.jump_app()
-        print("jumped to app" if ok else "ERROR: no valid app present")
+            for dev_addr, ext in sorted(devices):
+                if ext in DEV_TYPE_NAMES:
+                    type_name = DEV_TYPE_NAMES.get(ext, f"unknown(0x{ext:02X})")
+                    print(f"  addr=0x{dev_addr:02X}  type=0x{ext:02X} ({type_name})")
+                else:
+                    maj, min_, patch = decode_iap_version(ext)
+                    print(f"  addr=0x{dev_addr:02X}  iap_version={maj}.{min_}.{patch} ext=0x{ext:02X}")
     finally:
         cli.close()
 
@@ -276,8 +263,6 @@ def main():
     sc.add_argument("--collect", type=float, default=1.5,
                     help="seconds to collect scan responses (default 1.5)")
 
-    sp.add_parser("jump-app", help="jump to existing app without flashing")
-
     args = ap.parse_args()
 
     if args.chunk < 1 or args.chunk > 128:
@@ -289,8 +274,6 @@ def main():
         cmd_upload(args)
     elif args.cmd == "scan":
         cmd_scan(args)
-    elif args.cmd == "jump-app":
-        cmd_jump_app(args)
     else:
         raise SystemExit("unknown command")
 

@@ -400,6 +400,32 @@ bool CH32BusHost::firmwareInfo(size_t &sizeBytes) {
   return true;
 }
 
+bool CH32BusHost::firmwareRead(size_t offset, uint8_t *out, size_t maxLen, size_t &readLen) {
+  readLen = 0;
+  if (_fs == nullptr) { setError("no fs"); return false; }
+  if (out == nullptr && maxLen > 0U) { setError("bad arg"); return false; }
+  if (!_fs->exists(_fwPath)) { setError("no firmware"); return false; }
+  File f = _fs->open(_fwPath, "r");
+  if (!f) { setError("open failed"); return false; }
+  size_t size = static_cast<size_t>(f.size());
+  if (offset > size) {
+    f.close();
+    setError("offset range");
+    return false;
+  }
+  size_t want = maxLen;
+  if (want > (size - offset)) want = size - offset;
+  if (offset > 0U && !f.seek(offset, SeekSet)) {
+    f.close();
+    setError("seek failed");
+    return false;
+  }
+  readLen = f.read(out, want);
+  f.close();
+  if (readLen != want) { setError("read failed"); return false; }
+  return true;
+}
+
 bool CH32BusHost::filesystemStatus(size_t &totalBytes, size_t &usedBytes, size_t &freeBytes) {
   if (_fs == nullptr) { setError("no fs"); return false; }
   if (_fsTotalBytesFn == nullptr || _fsUsedBytesFn == nullptr) {
@@ -522,7 +548,7 @@ bool CH32BusHost::iapSendAndAck(uint8_t cmd, const uint8_t *data, uint8_t len, u
 bool CH32BusHost::iapProbe() {
   setBaud(_iapBaud);
   uint8_t err = 0xFF;
-  if (!iapSendAndAck(CMD_JUMP_IAP, nullptr, 0, 1500, &err)) return false;
+  if (!iapSendAndAck(CMD_IAP_SCAN, nullptr, 0, 1500, &err)) return false;
   if (err != IAP_ERR_SUCCESS) { setError("iap probe failed"); return false; }
   return true;
 }

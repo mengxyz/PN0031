@@ -77,6 +77,7 @@ public:
   bool readHeartbeat(HeartbeatInfo &out, uint32_t timeoutMs = 1000);
 
   bool firmwareInfo(size_t &sizeBytes);
+  bool firmwareRead(size_t offset, uint8_t *out, size_t maxLen, size_t &readLen);
   bool filesystemStatus(size_t &totalBytes, size_t &usedBytes, size_t &freeBytes);
   bool firmwareDelete();
   bool firmwareBeginWrite(size_t expectedBytes);
@@ -110,11 +111,11 @@ private:
 
   static const uint8_t IAP_SYNC1 = 0xAA;
   static const uint8_t IAP_SYNC2 = 0x55;
+  static const uint8_t CMD_IAP_SCAN = 0x01;
   static const uint8_t CMD_IAP_PROM = 0x80;
   static const uint8_t CMD_IAP_ERASE = 0x81;
   static const uint8_t CMD_IAP_VERIFY = 0x82;
   static const uint8_t CMD_IAP_END = 0x83;
-  static const uint8_t CMD_JUMP_IAP = 0x84;
   static const uint8_t CMD_IAP_CRC = 0x85;
   static const uint8_t IAP_ERR_SUCCESS = 0x00;
   static const size_t IAP_CHUNK_SIZE = 128;

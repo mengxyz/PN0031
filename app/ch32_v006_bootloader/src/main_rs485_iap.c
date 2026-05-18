@@ -19,7 +19,7 @@
 #define LED_PORT GPIOD
 #define LED_PIN  GPIO_Pin_0
 
-#define APP_FLASH_BASE 0x08002000UL                       /* app starts after 8KB bootloader */
+#define APP_FLASH_BASE 0x08000000UL                       /* WCH user flash app base */
 #define IAP_CAL_ADDR   (0x08000000UL + 62UL*1024UL - 4UL) /* last word of 62KB flash = 0x0800F7FC */
 #define IAP_CHECK_NUM  0x5AA55AA5UL
 
@@ -40,7 +40,6 @@
 #define CMD_IAP_ERASE  0x81U
 #define CMD_IAP_VERIFY 0x82U   /* legacy per-chunk verify, kept for compat */
 #define CMD_IAP_END    0x83U
-#define CMD_JUMP_APP   0x84U   /* jump to app if magic word present, no flash */
 #define CMD_IAP_CRC    0x85U   /* flush+verify: 4-byte payload [size_l size_h crc_l crc_h] */
 
 #define ERR_SUCCESS 0x00U
@@ -126,8 +125,7 @@ static void rs485_send_bytes(const uint8_t *buf, uint8_t len)
     rs485_set_tx(0U);
 }
 
-/* Fixed 7-byte response: AA 55 DEV_ADDR ERR EXT 55 AA
-   EXT = DEVICE_TYPE for CMD_SCAN, 0x00 otherwise. */
+/* Fixed 7-byte response: AA 55 DEV_ADDR ERR EXT 55 AA */
 static void send_resp(uint8_t err, uint8_t ext)
 {
     uint8_t resp[7];
@@ -186,8 +184,13 @@ static void flash_erase_page_fast_local(uint32_t page_address)
 static void flash_erase_all_pages_local(void)
 {
     uint32_t addr;
-    for (addr = APP_FLASH_BASE; addr < IAP_CAL_ADDR; addr += 0x100UL) {
-        flash_erase_page_fast_local(addr);
+    for (addr = APP_FLASH_BASE; addr < IAP_CAL_ADDR; addr += 0x400UL) {
+        FLASH->CTLR &= ~(uint32_t)FLASH_CTLR_PAGE_ER;
+        FLASH->CTLR |= FLASH_CTLR_PER;
+        FLASH->ADDR  = addr;
+        FLASH->CTLR |= FLASH_CTLR_STRT;
+        while ((FLASH->STATR & FLASH_SR_BSY) != 0U) {}
+        FLASH->CTLR &= ~FLASH_CTLR_PER;
     }
 }
 
@@ -227,6 +230,10 @@ static uint8_t rec_data_deal(void)
     case CMD_IAP_ERASE:
         flash_unlock_fast_local();
         flash_erase_all_pages_local();
+        g_code_len = 0U;
+        g_prog_cksum = 0U;
+        g_program_addr = APP_FLASH_BASE;
+        g_end_flag = 0U;
         s = ERR_SUCCESS;
         break;
 
@@ -276,10 +283,6 @@ static uint8_t rec_data_deal(void)
 
         FLASH->CTLR |= 0x00008000UL;
         FLASH->CTLR |= 0x00000080UL;
-        s = ERR_SUCCESS;
-        break;
-
-    case CMD_JUMP_APP:
         s = ERR_SUCCESS;
         break;
 
@@ -341,19 +344,12 @@ static void uart_rx_deal(void)
     }
     led_set(s == ERR_ERROR);
 
-    if (ISP_CMD->uart.cmd == CMD_JUMP_APP && s == ERR_SUCCESS) {
-        delay_cycles(96000U);   /* let response byte leave the bus */
-        iap_to_app();
-    }
 }
 
 static void iap_to_app(void)
 {
-    typedef void (*fn_t)(void);
-    /* Clear BOOT_MODE so the chip boots from user flash (0x08000000) on every
-       subsequent power-on or reset.  CMD_ENTER_BOOT sets Start_Mode_BOOT
-       (FLASH_STATR bit14=1); without clearing it here the WCH ROM would run
-       on the next power-on and the app would never start. */
+    /* Clear BOOT_MODE and reset into normal user flash.  Jumping directly to a
+       split address is unreliable on this target; use the WCH start-mode flow. */
     FLASH->KEYR          = FLASH_KEY1;
     FLASH->KEYR          = FLASH_KEY2;
     FLASH->BOOT_MODEKEYR = FLASH_KEY1;
@@ -361,7 +357,8 @@ static void iap_to_app(void)
     FLASH->STATR        &= ~(uint32_t)FLASH_STATR_BOOT_MODE;
     FLASH->CTLR         |= 0x80U;   /* re-lock */
     RCC_ClearFlag();
-    ((fn_t)APP_FLASH_BASE)();
+    NVIC_SystemReset();
+    while (1) {}
 }
 
 int main(void)

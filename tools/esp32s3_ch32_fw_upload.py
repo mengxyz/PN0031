@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import sys
 import time
 from pathlib import Path
@@ -106,6 +107,74 @@ def cmd_info(args):
         ser.close()
 
 
+def parse_fw_size(resp: str) -> int:
+    expect_ok(resp)
+    prefix = "OK size="
+    if not resp.startswith(prefix):
+        raise RuntimeError(f"unexpected response: {resp}")
+    return int(resp[len(prefix):].strip())
+
+
+def read_fw_chunk(ser: serial.Serial, offset: int, length: int) -> bytes:
+    resp = send_cmd(ser, f"fwr {offset} {length}", timeout_s=5.0)
+    prefix = "OK data "
+    if not resp.startswith(prefix):
+        raise RuntimeError(resp)
+    return bytes.fromhex(resp[len(prefix):].strip())
+
+
+def pull_firmware(ser: serial.Serial, chunk_size: int, progress: bool = False) -> bytes:
+    size = parse_fw_size(send_cmd(ser, "fwi", timeout_s=5.0))
+    out = bytearray()
+    while len(out) < size:
+        want = min(chunk_size, size - len(out))
+        part = read_fw_chunk(ser, len(out), want)
+        if len(part) != want:
+            raise RuntimeError(f"short read offset={len(out)} got={len(part)} expected={want}")
+        out += part
+        if progress:
+            print(f"download {len(out)}/{size}")
+    return bytes(out)
+
+
+def sha256_hex(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def cmd_download(args):
+    ser = serial.Serial(args.port, args.baud, timeout=args.timeout)
+    try:
+        ser.reset_input_buffer()
+        image = pull_firmware(ser, args.chunk, args.progress)
+        Path(args.output).write_bytes(image)
+        print(f"saved {args.output} size={len(image)} sha256={sha256_hex(image)}")
+    finally:
+        ser.close()
+
+
+def cmd_compare(args):
+    local = Path(args.image).read_bytes()
+    ser = serial.Serial(args.port, args.baud, timeout=args.timeout)
+    try:
+        ser.reset_input_buffer()
+        remote = pull_firmware(ser, args.chunk, args.progress)
+    finally:
+        ser.close()
+
+    local_hash = sha256_hex(local)
+    remote_hash = sha256_hex(remote)
+    print(f"local  size={len(local)} sha256={local_hash}")
+    print(f"remote size={len(remote)} sha256={remote_hash}")
+    if local == remote:
+        print("MATCH")
+        return
+
+    first = next((i for i, (a, b) in enumerate(zip(local, remote)) if a != b), None)
+    if first is None and len(local) != len(remote):
+        first = min(len(local), len(remote))
+    raise RuntimeError(f"MISMATCH first_diff={first}")
+
+
 def cmd_delete(args):
     ser = serial.Serial(args.port, args.baud, timeout=args.timeout)
     try:
@@ -177,6 +246,14 @@ def main():
     p_up.add_argument("--progress", action="store_true")
 
     sp.add_parser("info")
+    p_dl = sp.add_parser("download")
+    p_dl.add_argument("output")
+    p_dl.add_argument("--chunk", type=int, default=128)
+    p_dl.add_argument("--progress", action="store_true")
+    p_cmp = sp.add_parser("compare")
+    p_cmp.add_argument("image")
+    p_cmp.add_argument("--chunk", type=int, default=128)
+    p_cmp.add_argument("--progress", action="store_true")
     sp.add_parser("fs-status")
     sp.add_parser("delete")
     p_flash = sp.add_parser("flash")
@@ -187,6 +264,10 @@ def main():
         cmd_upload(args)
     elif args.cmd == "info":
         cmd_info(args)
+    elif args.cmd == "download":
+        cmd_download(args)
+    elif args.cmd == "compare":
+        cmd_compare(args)
     elif args.cmd == "fs-status":
         cmd_fs_status(args)
     elif args.cmd == "delete":
