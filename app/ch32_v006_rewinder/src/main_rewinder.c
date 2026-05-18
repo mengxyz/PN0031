@@ -92,7 +92,7 @@
 #define CMD_READ_FILAMENT    0x33U
 #define CMD_MOTOR_CTRL       0x40U
 #define CMD_GET_SWITCH_STATUS 0x41U
-#define CMD_HB               0x70U   /* heartbeat, device-initiated */
+#define CMD_HB               0x70U   /* heartbeat, master-polled */
 
 #define ST_OK        0x00U
 #define ST_BAD_CMD   0x01U
@@ -155,8 +155,8 @@ static uint8_t           g_motor_speed[4] = {0};   /* speed per channel 1-4 stor
 static uint16_t          g_motor_ccr[4] = {0};
 static uint16_t          g_motor_target_ccr[4] = {0};
 static volatile uint32_t g_argb[ARGB_LED_COUNT];    /* packed 0x00RRGGBB, sent as GRB via WSGRB */
-static uint16_t          g_led_rx_ticks = 0U;
-static uint32_t          g_last_hb_tick = 0U;
+static uint32_t          g_last_hb_blink_tick = 0U;
+static uint8_t           g_hb_led_on = 0U;
 static uint32_t          g_last_motor_ramp_tick = 0U;
 static uint32_t          g_last_pcf_poll_tick = 0U;
 
@@ -236,8 +236,8 @@ static void argb_all_off(void)
 static void argb_update_sys(void)
 {
     /* WSGRB packing: (b<<16)|(g<<8)|r */
-    g_argb[4] = g_registered ? 0x00000C00U   /* green */
-                             : 0x0000000CU;  /* red   */
+    g_argb[4] = g_registered ? 0x00000C00U   /* green: master online */
+                             : 0x0000000CU;  /* red: no master */
 }
 
 static void argb_update_motors(void)
@@ -249,6 +249,19 @@ static void argb_update_motors(void)
         } else {
             argb_set(ch - 1U, 12U, 12U, 12U);  /* white 5% = idle */
         }
+    }
+}
+
+static void bus_mark_master_seen(void)
+{
+    g_last_host_tick = g_tick;
+    if (!g_registered) {
+        g_registered = 1U;
+        g_last_hb_blink_tick = g_tick;
+        g_hb_led_on = 1U;
+        led_set(true);
+        argb_update_sys();
+        argb_flush();
     }
 }
 
@@ -723,7 +736,7 @@ static bool poll_filament(uint8_t ant, FilamentDecoded *f)
 /* Frame: 55 AA DEST CMD SEQ PLEN_L PLEN_H [PAYLOAD] CRC16_L CRC16_H  */
 /* Response same structure with DEV_ADDR instead of DEST, CMD|0x80.    */
 /* CRC16-CCITT (init 0xFFFF, poly 0x1021) over [DEST..PAYLOAD].        */
-/* Heartbeat CMD_HB is device-initiated, no request frame.             */
+/* Heartbeat CMD_HB is master-polled and addressed per device.         */
 /* ------------------------------------------------------------------ */
 static uint16_t crc16(const uint8_t *data, uint16_t len)
 {
@@ -754,21 +767,6 @@ static void bus_send(uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t 
     bus_uart_write(frame, (uint16_t)(9U + plen));
 }
 
-static void bus_send_hb(void)
-{
-    /* minimal alive ping: [type, addr] */
-    uint8_t pl[2] = { DEVICE_TYPE, DEVICE_ADDR };
-    uint8_t frame[9 + 2];
-    uint16_t crc;
-    frame[0]=SOF0; frame[1]=SOF1;
-    frame[2]=DEVICE_ADDR; frame[3]=CMD_HB; frame[4]=0x00U;
-    put_u16le(&frame[5], 2U);
-    memcpy(&frame[7], pl, 2U);
-    crc = crc16(&frame[2], (uint16_t)(5U + 2U));
-    put_u16le(&frame[9], crc);
-    bus_uart_write(frame, 11U);
-}
-
 static void bus_handle_cmd(uint8_t dest, uint8_t cmd, uint8_t seq,
                            const uint8_t *payload, uint16_t plen)
 {
@@ -782,15 +780,11 @@ static void bus_handle_cmd(uint8_t dest, uint8_t cmd, uint8_t seq,
         for (volatile uint32_t d = 0; d < (uint32_t)DEVICE_ADDR * 96000UL; d++) {}
     }
 
-    GPIO_SetBits(LED_PORT, LED_PIN);
-    g_led_rx_ticks = 20U;
-    g_last_host_tick = g_tick;
-
     switch (cmd) {
     case CMD_DISCOVER:
     case CMD_PING:
     case CMD_GET_VERSION: {
-        g_registered = 1U;
+        bus_mark_master_seen();
         uint32_t uid0 = UID_WORD0, uid1 = UID_WORD1;
         out[0]=ST_OK; out[1]=DEVICE_TYPE; out[2]=DEVICE_ADDR;
         out[3]=APP_VERSION_MAJOR; out[4]=APP_VERSION_MINOR; out[5]=APP_VERSION_PATCH;
@@ -852,8 +846,8 @@ static void bus_handle_cmd(uint8_t dest, uint8_t cmd, uint8_t seq,
         out[0]=ST_OK; out_len=1U; break;
 
     case CMD_HB:
-        /* master keepalive — timeout already reset at top of this function */
-        out[0]=ST_OK; out_len=1U; break;
+        bus_mark_master_seen();
+        out[0]=ST_OK; out[1]=DEVICE_TYPE; out[2]=DEVICE_ADDR; out_len=3U; break;
 
     default:
         out[0]=ST_BAD_CMD; out_len=1U; break;
@@ -874,6 +868,20 @@ static void bus_housekeeping(void)
 {
     if (g_registered && (g_tick - g_last_host_tick) >= HOST_TIMEOUT_MS) {
         g_registered = 0U;
+        g_hb_led_on = 0U;
+        led_set(false);
+        argb_update_sys();
+        argb_flush();
+    }
+}
+
+static void hb_led_task(void)
+{
+    if (!g_registered) return;
+    if ((g_tick - g_last_hb_blink_tick) >= 1000U) {
+        g_last_hb_blink_tick = g_tick;
+        g_hb_led_on = (uint8_t)!g_hb_led_on;
+        led_set(g_hb_led_on != 0U);
     }
 }
 
@@ -907,7 +915,7 @@ static void bus_poll(void)
         crc_calc = crc16(&rx[2], (uint16_t)(5U + plen));
         if (crc_calc == crc_rx) {
             uint8_t dest = rx[2], cmd = rx[3], seq = rx[4];
-            if (dest == DEVICE_ADDR || dest == BROADCAST_ADDR) {
+            if (dest == DEVICE_ADDR || (dest == BROADCAST_ADDR && cmd == CMD_DISCOVER)) {
                 bus_handle_cmd(dest, cmd, seq, &rx[7], plen);
             }
         }
@@ -942,11 +950,12 @@ int main(void)
         led_set((i & 1U) != 0U);
         for (volatile uint32_t d = 0; d < 3600000U; d++) {}
     }
-    led_set(true);
+    led_set(false);
 
     /* init ARGB — motors white idle, system LED reflects registration state */
     for (i = 0; i < ARGB_LED_COUNT - 1U; i++) argb_set(i, 12U, 12U, 12U);
     argb_update_sys();  /* red = unregistered at startup */
+    argb_flush();
 
     bus_uart_init();
     pn_uart_init();
@@ -957,7 +966,6 @@ int main(void)
     (void)pcf8574_write_port(&g_pcf_bus, &g_pcf_dev, 0xFFU); /* all inputs */
     (void)pcf8574_refresh(&g_pcf_bus, &g_pcf_dev);
 
-    g_last_hb_tick = g_tick;
     g_last_pcf_poll_tick = g_tick;
 
     while (1) {
@@ -965,20 +973,6 @@ int main(void)
         bus_poll();
         motor_ramp_task();
         pcf_switch_task();
-
-        /* heartbeat every 1 s */
-        if ((g_tick - g_last_hb_tick) >= 1000U) {
-            g_last_hb_tick = g_tick;
-            bus_send_hb();
-            led_set((g_tick / 1000U) & 1U);
-            argb_update_motors();
-            argb_update_sys();
-            argb_flush();
-        }
-
-        if (g_led_rx_ticks > 0U) {
-            g_led_rx_ticks--;
-            if (g_led_rx_ticks == 0U) led_set(true);
-        }
+        hb_led_task();
     }
 }

@@ -3,7 +3,7 @@
 CH32V006 RS485 live REPL.
 Usage: python3 ch32v006_rs485_live.py --port /dev/tty.xxx [--baud 460800] [--addr 0x01] [--debug]
 
-Stays connected. Background thread prints incoming heartbeat frames.
+Stays connected. After discover, a background thread sends addressed heartbeat polls.
 Type commands at the prompt; type 'help' for the list.
 """
 import argparse
@@ -230,6 +230,15 @@ def do_version(cli: LiveClient, _tokens):
           f"addr=0x{p[2]:02X} version={p[3]}.{p[4]}.{p[5]} uid={uid}")
 
 
+def do_heartbeat(cli: LiveClient, _tokens):
+    p = cli.request(CMD_HB)
+    typ = p[1] if len(p) >= 3 else 0xFF
+    addr = p[2] if len(p) >= 3 else 0xFF
+    print(f"status={status_name(p[0])} type={DEV_TYPE_NAMES.get(typ, f'0x{typ:02X}')} addr=0x{addr:02X}")
+    if len(p) >= 3:
+        cli.register_device(addr)
+
+
 def do_enter_boot(cli: LiveClient, _tokens):
     confirm = input("enter bootloader? this will reset the device [y/N] ").strip().lower()
     if confirm != "y":
@@ -319,6 +328,8 @@ COMMANDS = {
     "discover":      (do_discover,      "broadcast discover all devices"),
     "ping":          (do_ping,          "ping device"),
     "version":       (do_version,       "get firmware version"),
+    "heartbeat":     (do_heartbeat,     "poll addressed heartbeat"),
+    "keepalive":     (do_heartbeat,     "poll addressed heartbeat"),
     "enter-boot":    (do_enter_boot,    "reboot into IAP bootloader"),
     "switch":        (do_switch,        "read limit switch states"),
     "motor":         (do_motor,         "motor <ch 1-4> <speed 0-255>"),

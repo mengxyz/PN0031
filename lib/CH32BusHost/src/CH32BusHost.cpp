@@ -378,6 +378,14 @@ bool CH32BusHost::readHeartbeat(HeartbeatInfo &out, uint32_t timeoutMs) {
     BusFrame rx;
     uint32_t remaining = timeoutMs - (millis() - start);
     if (!busReadFrame(rx, remaining)) return false;
+    if (rx.cmd == static_cast<uint8_t>(CMD_HB | 0x80U)) {
+      if (rx.payloadLen < 3U) { setError("bad heartbeat payload"); return false; }
+      out.deviceAddr = rx.addr;
+      out.deviceType = rx.payload[1];
+      out.reportedAddr = rx.payload[2];
+      clearError();
+      return true;
+    }
     if (rx.cmd != CMD_HB) continue;
     if (rx.payloadLen < 2U) { setError("bad heartbeat payload"); return false; }
     out.deviceAddr = rx.addr;

@@ -159,6 +159,12 @@ class AppClient:
         uid = p[6:14].hex().upper() if len(p) >= 14 else ""
         return p[0], p[1], p[2], p[3], p[4], p[5], uid
 
+    def heartbeat(self):
+        p = self.request(CMD_HB)
+        if len(p) < 3:
+            raise RuntimeError("Short heartbeat response")
+        return p[0], p[1], p[2]
+
     def enter_boot(self):
         return self.request(CMD_ENTER_BOOT, timeout_s=1.0)[0]
 
@@ -206,28 +212,6 @@ class AppClient:
             "detailed_type": detailed_type, "production_time": production_time,
         }
 
-    def listen_hb(self, duration_s: float = 10.0):
-        """Passively receive unsolicited CMD_HB frames."""
-        results = []
-        deadline = time.time() + duration_s
-        while time.time() < deadline:
-            try:
-                dev_addr, rc_cmd, _seq, p = self._recv_frame(timeout_s=0.2)
-                if rc_cmd == CMD_HB and len(p) >= 8:
-                    results.append({
-                        "dev_addr":   dev_addr,
-                        "type":       p[0],
-                        "addr":       p[1],
-                        "version":    (p[2], p[3], p[4]),
-                        "motor_mask": p[5],
-                        "sw_mask":    p[6],
-                        "pcf_raw":    p[7],
-                    })
-            except TimeoutError:
-                pass
-        return results
-
-
 # ------------------------------------------------------------------ #
 # CLI command handlers
 # ------------------------------------------------------------------ #
@@ -256,6 +240,11 @@ def cmd_version(cli: AppClient, _args):
     st, typ, addr, maj, mi, patch, uid = cli.get_version()
     print(f"status={status_name(st)} type={DEV_TYPE_NAMES.get(typ, f'0x{typ:02X}')} "
           f"addr=0x{addr:02X} version={maj}.{mi}.{patch} uid={uid}")
+
+
+def cmd_heartbeat(cli: AppClient, _args):
+    st, typ, addr = cli.heartbeat()
+    print(f"status={status_name(st)} type={DEV_TYPE_NAMES.get(typ, f'0x{typ:02X}')} addr=0x{addr:02X}")
 
 
 def cmd_enter_boot(cli: AppClient, _args):
@@ -307,21 +296,6 @@ def cmd_read_filament(cli: AppClient, args):
         print(f"status={status_name(st)}")
 
 
-def cmd_listen(cli: AppClient, args):
-    print(f"listening for heartbeats ({args.duration}s)...")
-    hbs = cli.listen_hb(duration_s=args.duration)
-    if not hbs:
-        print("no heartbeats received")
-        return
-    for h in hbs:
-        v = h["version"]
-        motors   = "  ".join(f"m{i+1}={'ON' if (h['motor_mask']>>i)&1 else 'off'}" for i in range(4))
-        switches = "  ".join(f"sw{i+1}={'ON' if (h['sw_mask']>>i)&1 else 'off'}" for i in range(4))
-        tname = DEV_TYPE_NAMES.get(h["type"], f"0x{h['type']:02X}")
-        print(f"HB addr=0x{h['dev_addr']:02X}  type={tname}  "
-              f"v={v[0]}.{v[1]}.{v[2]}  {motors}  {switches}  pcf=0x{h['pcf_raw']:02X}")
-
-
 def main():
     ap = argparse.ArgumentParser(description="CH32V006 rewinder app RS485 tool")
     ap.add_argument("--port",    required=True)
@@ -336,6 +310,8 @@ def main():
     sp.add_parser("discover",          help="broadcast discover all devices")
     sp.add_parser("ping",              help="ping device")
     sp.add_parser("version",           help="get firmware version")
+    sp.add_parser("heartbeat",         help="poll addressed heartbeat")
+    sp.add_parser("hb",                help="poll addressed heartbeat")
     sp.add_parser("enter-boot",        help="reboot into IAP bootloader")
     sp.add_parser("get-switch-status", help="read limit switch states")
 
@@ -350,9 +326,6 @@ def main():
     p_fil = sp.add_parser("read-filament", help="read filament tag data")
     p_fil.add_argument("antenna",      type=int, choices=[1, 2, 3, 4])
 
-    p_listen = sp.add_parser("listen", help="listen for heartbeat frames")
-    p_listen.add_argument("--duration", type=float, default=10.0)
-
     args = ap.parse_args()
 
     if not (0x01 <= args.addr <= 0xFF):
@@ -366,12 +339,13 @@ def main():
             "discover":          cmd_discover,
             "ping":              cmd_ping,
             "version":           cmd_version,
+            "heartbeat":         cmd_heartbeat,
+            "hb":                cmd_heartbeat,
             "enter-boot":        cmd_enter_boot,
             "get-switch-status": cmd_get_switch,
             "motor":             cmd_motor,
             "read-uid":          cmd_read_uid,
             "read-filament":     cmd_read_filament,
-            "listen":            cmd_listen,
         }[args.cmd](cli, args)
     finally:
         cli.close()
