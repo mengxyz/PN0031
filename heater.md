@@ -1,6 +1,6 @@
 # pins
 - PD7 RTS (** do not use it hardware reset pin)
-- PA1 FAN STATUS DIGITAL INPUT
+- PA1 FAN TACH INPUT, pull-up, falling-edge pulse count
 - PA2 POWER STATUS  DIGITAL INPUT
 - PD0 NOT USE
 - PD1 SWIO (not used)
@@ -20,7 +20,7 @@
 
 # NTC WIRE
 ```text
-GNG --- 10K --|-- 10K NTC --- VCC
+GND --- 10K NTC --|-- 10K --- VCC
               |
              ADC
 ```

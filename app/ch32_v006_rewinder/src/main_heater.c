@@ -3,12 +3,13 @@
  * Heater device for CH32V006.
  * Bus USART1 RS485 460800 8N1 PD5=TX PD6=RX PD4=DE
  * PC0 ARGB, PC4 boot/status LED, PC5 heartbeat LED, PC6 heater, PC7 fan PWM
- * PA1 fan status, PA2 power status, PC3 door, PD2/PD3 NTC ADC.
+ * PA1 fan tach, PA2 power status, PC3 door, PD2/PD3 NTC ADC.
  */
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 #include <ch32v00X.h>
 #include "ch32v00X_tim.h"
@@ -42,7 +43,7 @@
 
 #define APP_VERSION_MAJOR 0x01U
 #define APP_VERSION_MINOR 0x00U
-#define APP_VERSION_PATCH 0x1DU
+#define APP_VERSION_PATCH 0x2AU
 #define UID_WORD0         (*(volatile uint32_t *)0x1FFFF7E8U)
 #define UID_WORD1         (*(volatile uint32_t *)0x1FFFF7ECU)
 
@@ -103,9 +104,27 @@
 #define FAN_PWM_PERIOD 2399U
 #define FAN_DRY_PWM 2100U
 #define FAN_COOL_PWM 1800U
+#define FAN_TACH_SAMPLE_MS 1000U
+#define FAN_TACH_PULSES_PER_REV 2U
+#define FAN_TACH_MIN_PWM_BYTE 20U
+#define FAN_TACH_FAIL_MS 3000U
+#define FAN_TACH_FULL_RPM 5000U
+#define FAN_TACH_LOW_RATIO_PCT 35U
 #define SOFTSTART_MS 30000U
 #define TEMP_UNAVAILABLE 0x7FFF
 #define HUM_UNAVAILABLE 0xFFFFU
+#define NTC_ADC_MAX_COUNTS 4095U
+#define NTC_ADC_MAX 4095.0f
+#define NTC_ADC_REF_MV 3300.0f
+#define NTC_SUPPLY_MV 3300.0f
+#define NTC_FIXED_OHM 10000.0f
+#define NTC_R0_OHM 10000.0f
+#define NTC_BETA_K 3590.0f
+#define NTC_T0_K 298.15f
+#define NTC_HIGH_SIDE 0
+#define HEATER_NTC_PARALLEL_OHM 100000.0f
+#define HEATER_NTC_MISSING_RATIO 0.90f
+#define HEATER_NTC_MISSING_RAW_MAX 1500U
 
 enum {
     DRY_IDLE = 0,
@@ -120,7 +139,8 @@ enum {
     ERR_DOOR_OPEN = 1U << 2,
     ERR_PCB_OVERHEAT = 1U << 3,
     ERR_NTC = 1U << 4,
-    ERR_MASTER_LOST = 1U << 5
+    ERR_MASTER_LOST = 1U << 5,
+    ERR_AIR_SENSOR = 1U << 6
 };
 
 enum {
@@ -151,8 +171,16 @@ static int16_t g_pcb_temp_c10 = TEMP_UNAVAILABLE;
 static int16_t g_heater_temp_c10 = TEMP_UNAVAILABLE;
 static int16_t g_air_temp_c10 = TEMP_UNAVAILABLE;
 static uint16_t g_humidity_rh10 = HUM_UNAVAILABLE;
+static uint16_t g_pcb_adc_raw;
+static uint16_t g_heater_adc_raw;
 static uint8_t g_heater_output_pct;
 static uint8_t g_fan_pwm_byte;
+static volatile uint32_t g_fan_tach_edges;
+static uint32_t g_last_fan_tach_tick;
+static uint32_t g_last_fan_tach_edges;
+static uint32_t g_last_fan_cmd_tick;
+static uint16_t g_fan_rpm;
+static uint16_t g_fan_min_rpm;
 static volatile uint32_t g_argb[ARGB_LED_COUNT];
 static uint8_t g_argb_fault;
 static uint8_t g_air_sensor_type; /* 0=none, 1=SHT40, 2=AHT20 */
@@ -161,7 +189,7 @@ static uint8_t g_oled[OLED_W * OLED_PAGES];
 static uint8_t g_argb_update_pending;
 static uint8_t g_display_dirty = 1U;
 static uint8_t g_display_last_colon = 0xFFU;
-static int16_t g_display_last_heater_temp_c10 = TEMP_UNAVAILABLE;
+static int16_t g_display_last_air_temp_c10 = TEMP_UNAVAILABLE;
 static uint16_t g_display_last_humidity_rh10 = HUM_UNAVAILABLE;
 static uint32_t g_display_last_time_s = 0xFFFFFFFFUL;
 static volatile uint8_t g_bus_rx_buf[BUS_UART_RX_RING];
@@ -182,6 +210,15 @@ void USART1_IRQHandler(void)
             g_bus_rx_buf[g_bus_rx_head] = b;
             g_bus_rx_head = next;
         }
+    }
+}
+
+void EXTI7_0_IRQHandler(void) __attribute__((interrupt("WCH-Interrupt-fast")));
+void EXTI7_0_IRQHandler(void)
+{
+    if ((EXTI->INTFR & EXTI_Line1) != 0U) {
+        g_fan_tach_edges++;
+        EXTI->INTFR = EXTI_Line1;
     }
 }
 
@@ -261,8 +298,12 @@ static void gpio_init_all(void)
     g.GPIO_Mode = GPIO_Mode_IN_FLOATING;
     g.GPIO_Pin = DOOR_PIN;
     GPIO_Init(DOOR_PORT, &g);
-    g.GPIO_Pin = FAN_STAT_PIN | PWR_STAT_PIN;
-    GPIO_Init(GPIOA, &g);
+    g.GPIO_Mode = GPIO_Mode_IPU;
+    g.GPIO_Pin = FAN_STAT_PIN;
+    GPIO_Init(FAN_STAT_PORT, &g);
+    g.GPIO_Mode = GPIO_Mode_IN_FLOATING;
+    g.GPIO_Pin = PWR_STAT_PIN;
+    GPIO_Init(PWR_STAT_PORT, &g);
 
     g.GPIO_Mode = GPIO_Mode_AIN;
     g.GPIO_Pin = GPIO_Pin_2 | GPIO_Pin_3;
@@ -272,6 +313,17 @@ static void gpio_init_all(void)
     g.GPIO_Pin = I2C_SDA_PIN | I2C_SCL_PIN;
     GPIO_Init(I2C_PORT, &g);
     GPIO_SetBits(I2C_PORT, I2C_SDA_PIN | I2C_SCL_PIN);
+}
+
+static void fan_tach_init(void)
+{
+    GPIO_EXTILineConfig(GPIO_PortSourceGPIOA, GPIO_PinSource1);
+    EXTI->INTENR |= EXTI_Line1;
+    EXTI->EVENR &= (uint32_t)~EXTI_Line1;
+    EXTI->RTENR &= (uint32_t)~EXTI_Line1;
+    EXTI->FTENR |= EXTI_Line1;
+    EXTI->INTFR = EXTI_Line1;
+    NVIC_EnableIRQ(EXTI7_0_IRQn);
 }
 
 static void fan_pwm_init(void)
@@ -303,9 +355,14 @@ static void fan_pwm_init(void)
 
 static void fan_set_pwm(uint16_t ccr)
 {
+    uint8_t pwm_byte;
     if (ccr > FAN_PWM_PERIOD) ccr = FAN_PWM_PERIOD;
     TIM1->CH4CVR = ccr;
-    g_fan_pwm_byte = (uint8_t)((uint32_t)ccr * 255U / FAN_PWM_PERIOD);
+    pwm_byte = (uint8_t)((uint32_t)ccr * 255U / FAN_PWM_PERIOD);
+    if ((pwm_byte == 0U && g_fan_pwm_byte != 0U) || (pwm_byte != 0U && g_fan_pwm_byte == 0U)) {
+        g_last_fan_cmd_tick = g_tick;
+    }
+    g_fan_pwm_byte = pwm_byte;
 }
 
 static void adc_init_simple(void)
@@ -314,31 +371,113 @@ static void adc_init_simple(void)
     RCC_ADCCLKConfig(RCC_PCLK2_Div8);
     ADC1->SAMPTR2 = ADC_SMP3 | ADC_SMP4;
     ADC1->RSQR1 = 0U;
+    ADC1->RSQR2 = 0U;
+    ADC1->RSQR3 = 0U;
     ADC1->CTLR2 = ADC_ADON | ADC_EXTTRIG;
+}
+
+static uint16_t adc_read_once(uint8_t ch)
+{
+    uint32_t t = 100000U;
+    ADC1->RSQR1 = 0U;
+    ADC1->RSQR2 = 0U;
+    ADC1->RSQR3 = (uint32_t)(ch & ADC_SQ1);
+    for (volatile uint16_t settle = 0U; settle < 120U; ++settle) {}
+    ADC1->STATR = 0U;
+    ADC1->CTLR2 |= ADC_SWSTART;
+    while (((ADC1->STATR & ADC_EOC) == 0U) && --t) {}
+    if (t == 0U) return 0U;
+    return (uint16_t)(ADC1->RDATAR & NTC_ADC_MAX_COUNTS);
 }
 
 static uint16_t adc_read(uint8_t ch)
 {
-    uint32_t t = 100000U;
-    ADC1->RSQR3 = ch;
-    ADC1->STATR = 0U;
-    ADC1->CTLR2 |= ADC_SWSTART;
-    while (((ADC1->STATR & ADC_EOC) == 0U) && --t) {}
-    return (uint16_t)(ADC1->RDATAR & 0x0FFFU);
+    uint32_t sum = 0U;
+    (void)adc_read_once(ch);
+    for (uint8_t i = 0U; i < 4U; ++i) {
+        sum += adc_read_once(ch);
+    }
+    return (uint16_t)((sum + 2U) / 4U);
+}
+
+static int16_t ntc_resistance_to_c10(float r_ntc)
+{
+    float inv_t, c;
+    int32_t c10;
+    if (r_ntc <= 0.0f) return TEMP_UNAVAILABLE;
+    inv_t = (1.0f / NTC_T0_K) + (logf(r_ntc / NTC_R0_OHM) / NTC_BETA_K);
+    c = (1.0f / inv_t) - 273.15f;
+    if (c < -40.0f) c = -40.0f;
+    if (c > 150.0f) c = 150.0f;
+    c10 = (int32_t)((c * 10.0f) + (c >= 0.0f ? 0.5f : -0.5f));
+    return (int16_t)c10;
+}
+
+static float ntc_raw_to_resistance(uint16_t raw)
+{
+    float v_adc;
+    if (raw < 2U || raw >= NTC_ADC_MAX_COUNTS) return 0.0f;
+    v_adc = ((float)raw * NTC_ADC_REF_MV) / NTC_ADC_MAX;
+    if (v_adc <= 0.0f || v_adc >= NTC_SUPPLY_MV) return 0.0f;
+#if NTC_HIGH_SIDE
+    /* GND -- fixed resistor -- ADC -- NTC -- VCC */
+    return NTC_FIXED_OHM * (NTC_SUPPLY_MV - v_adc) / v_adc;
+#else
+    /* GND -- NTC -- ADC -- fixed resistor -- VCC */
+    return NTC_FIXED_OHM * v_adc / (NTC_SUPPLY_MV - v_adc);
+#endif
 }
 
 static int16_t ntc_raw_to_c10(uint16_t raw)
 {
-    int32_t c10;
-    if (raw < 32U || raw > 4064U) return TEMP_UNAVAILABLE;
-    c10 = 250 + (((int32_t)raw - 2048) * 5) / 7;
-    if (c10 < -400) c10 = -400;
-    if (c10 > 1500) c10 = 1500;
-    return (int16_t)c10;
+    return ntc_resistance_to_c10(ntc_raw_to_resistance(raw));
+}
+
+static int16_t heater_ntc_raw_to_c10(uint16_t raw)
+{
+    float r_eq = ntc_raw_to_resistance(raw);
+    float r_ntc;
+    if (raw <= HEATER_NTC_MISSING_RAW_MAX) return TEMP_UNAVAILABLE;
+    if (r_eq <= 0.0f) return TEMP_UNAVAILABLE;
+    if (r_eq >= (HEATER_NTC_PARALLEL_OHM * HEATER_NTC_MISSING_RATIO)) return TEMP_UNAVAILABLE;
+    r_ntc = (r_eq * HEATER_NTC_PARALLEL_OHM) / (HEATER_NTC_PARALLEL_OHM - r_eq);
+    return ntc_resistance_to_c10(r_ntc);
 }
 
 static uint8_t door_open(void) { return (GPIO_ReadInputDataBit(DOOR_PORT, DOOR_PIN) == 0U) ? 1U : 0U; }
-static uint8_t fan_ok(void) { return (GPIO_ReadInputDataBit(FAN_STAT_PORT, FAN_STAT_PIN) != 0U) ? 1U : 0U; }
+static void fan_tach_task(void)
+{
+    uint32_t now = g_tick;
+    uint32_t elapsed = now - g_last_fan_tach_tick;
+    uint32_t edges;
+    uint32_t delta;
+    uint32_t rpm;
+    uint32_t expected;
+
+    if (elapsed < FAN_TACH_SAMPLE_MS) return;
+    edges = g_fan_tach_edges;
+    delta = edges - g_last_fan_tach_edges;
+    g_last_fan_tach_edges = edges;
+    g_last_fan_tach_tick = now;
+
+    if (FAN_TACH_PULSES_PER_REV == 0U || elapsed == 0U) rpm = 0U;
+    else rpm = (delta * 60000UL) / ((uint32_t)FAN_TACH_PULSES_PER_REV * elapsed);
+    if (rpm > 65535UL) rpm = 65535UL;
+    g_fan_rpm = (uint16_t)rpm;
+
+    expected = ((uint32_t)g_fan_pwm_byte * FAN_TACH_FULL_RPM) / 255UL;
+    expected = (expected * FAN_TACH_LOW_RATIO_PCT) / 100UL;
+    if (g_fan_pwm_byte < FAN_TACH_MIN_PWM_BYTE) expected = 0UL;
+    if (expected > 65535UL) expected = 65535UL;
+    g_fan_min_rpm = (uint16_t)expected;
+}
+
+static uint8_t fan_ok(void)
+{
+    if (g_fan_pwm_byte < FAN_TACH_MIN_PWM_BYTE) return 1U;
+    if ((g_tick - g_last_fan_cmd_tick) < FAN_TACH_FAIL_MS) return 1U;
+    return (g_fan_rpm >= g_fan_min_rpm && g_fan_rpm != 0U) ? 1U : 0U;
+}
 static uint8_t power_ok(void) { return (GPIO_ReadInputDataBit(PWR_STAT_PORT, PWR_STAT_PIN) != 0U) ? 1U : 0U; }
 
 static void i2c_delay(void) { for (volatile uint16_t d = 0U; d < 60U; d++) {} }
@@ -695,7 +834,7 @@ static void display_task(bool force)
     if (!g_oled_ok) return;
     colon = (uint8_t)((g_tick / 1000UL) & 1UL);
     time_s = display_time_left_s();
-    if (g_heater_temp_c10 != g_display_last_heater_temp_c10 ||
+    if (g_air_temp_c10 != g_display_last_air_temp_c10 ||
         g_humidity_rh10 != g_display_last_humidity_rh10 ||
         time_s != g_display_last_time_s ||
         colon != g_display_last_colon) {
@@ -706,7 +845,7 @@ static void display_task(bool force)
     g_last_display_tick = g_tick;
     g_display_dirty = 0U;
     g_display_last_colon = colon;
-    g_display_last_heater_temp_c10 = g_heater_temp_c10;
+    g_display_last_air_temp_c10 = g_air_temp_c10;
     g_display_last_humidity_rh10 = g_humidity_rh10;
     g_display_last_time_s = time_s;
     oled_clear_buf();
@@ -715,7 +854,7 @@ static void display_task(bool force)
     oled_draw_text_xy(45U, 0U, "HUMI");
     oled_draw_text_xy(90U, 0U, "TIME");
 
-    display_draw_c10_value(1U, 38U, 15U, g_heater_temp_c10, 'C');
+    display_draw_c10_value(1U, 38U, 15U, g_air_temp_c10, 'C');
     display_draw_rh_value(40U, 74U, 15U, g_humidity_rh10);
     display_draw_time(76U, 127U, 15U, time_s);
 
@@ -773,8 +912,10 @@ static void sample_task(bool force)
 {
     if (!force && (g_tick - g_last_sample_tick) < STATUS_SAMPLE_MS) return;
     g_last_sample_tick = g_tick;
-    g_pcb_temp_c10 = ntc_raw_to_c10(adc_read(3U));
-    g_heater_temp_c10 = ntc_raw_to_c10(adc_read(4U));
+    g_pcb_adc_raw = adc_read(3U);
+    g_heater_adc_raw = adc_read(4U);
+    g_pcb_temp_c10 = ntc_raw_to_c10(g_pcb_adc_raw);
+    g_heater_temp_c10 = heater_ntc_raw_to_c10(g_heater_adc_raw);
     if (!force && (g_tick - g_last_air_sample_tick) < AIR_SAMPLE_MS) return;
     g_last_air_sample_tick = g_tick;
     if ((g_air_sensor_type == 1U && sht40_read(&g_air_temp_c10, &g_humidity_rh10)) ||
@@ -786,6 +927,11 @@ static void sample_task(bool force)
         g_humidity_rh10 = HUM_UNAVAILABLE;
         air_sensor_detect();
     }
+}
+
+static bool air_sensor_online(void)
+{
+    return (g_air_temp_c10 != TEMP_UNAVAILABLE && g_humidity_rh10 != HUM_UNAVAILABLE);
 }
 
 static void heater_set(bool on) { led_set(HEATER_PORT, HEATER_PIN, on); }
@@ -922,7 +1068,19 @@ static void fill_status(uint8_t *out, uint16_t *out_len)
     put_u16le(&out[p], g_time_left_min); p += 2U;
     out[p++] = g_heater_output_pct;
     out[p++] = g_fan_pwm_byte;
+    put_u16le(&out[p], g_pcb_adc_raw); p += 2U;
+    put_u16le(&out[p], g_heater_adc_raw); p += 2U;
+    put_u16le(&out[p], g_fan_rpm); p += 2U;
+    put_u16le(&out[p], g_fan_min_rpm); p += 2U;
     *out_len = p;
+}
+
+static void fill_heater_ack(uint8_t *out, uint16_t *out_len, uint8_t status)
+{
+    out[0] = status;
+    put_u16le(&out[1], g_error_bits);
+    put_u16le(&out[3], g_warn_bits);
+    *out_len = 5U;
 }
 
 static void bus_handle_cmd(uint8_t dest, uint8_t cmd, uint8_t seq, const uint8_t *payload, uint16_t plen)
@@ -947,10 +1105,19 @@ static void bus_handle_cmd(uint8_t dest, uint8_t cmd, uint8_t seq, const uint8_t
         mins = get_u16le(&payload[1]);
         if (payload[0] < 40U || payload[0] > 60U || mins < 1U || mins > 1440U) { out[0]=ST_BAD_ARG; out_len=1U; break; }
         bus_mark_master_seen();
+        sample_task(true);
+        if (!air_sensor_online()) {
+            g_error_bits = ERR_AIR_SENSOR;
+            fill_heater_ack(out, &out_len, ST_NOT_READY); break;
+        }
+        if (g_heater_temp_c10 == TEMP_UNAVAILABLE || g_pcb_temp_c10 == TEMP_UNAVAILABLE) {
+            g_error_bits = ERR_NTC;
+            fill_heater_ack(out, &out_len, ST_NOT_READY); break;
+        }
         g_error_bits = 0U; g_warn_bits = 0U; g_target_temp_c = payload[0]; g_time_left_min = mins;
         g_dry_duration_ms = (uint32_t)mins * 60000UL;
         g_dry_start_tick = g_tick; g_window_start_tick = g_tick; g_state = DRY_DRYING;
-        fan_set_pwm(FAN_DRY_PWM); request_argb_update(); out[0]=ST_OK; out_len=1U; break;
+        fan_set_pwm(FAN_DRY_PWM); request_argb_update(); fill_heater_ack(out, &out_len, ST_OK); break;
     }
     case CMD_HEATER_STOP:
         if (plen != 0U) { out[0]=ST_BAD_ARG; out_len=1U; break; }
@@ -1054,6 +1221,7 @@ static void control_task(void)
     if (g_state != DRY_DRYING && g_state != DRY_COOLDOWN) return;
 
     if (g_heater_temp_c10 == TEMP_UNAVAILABLE || g_pcb_temp_c10 == TEMP_UNAVAILABLE) { dry_stop(ERR_NTC); return; }
+    if (!air_sensor_online()) { dry_stop(ERR_AIR_SENSOR); return; }
     if (door_open()) {
         g_warn_bits |= WARN_DOOR_OPEN;
         g_heater_output_pct = 0U;
@@ -1064,6 +1232,11 @@ static void control_task(void)
     g_warn_bits &= (uint16_t)~WARN_DOOR_OPEN;
     if (g_pcb_temp_c10 >= 800) { dry_stop(ERR_PCB_OVERHEAT); return; }
     if (g_heater_temp_c10 >= 1100) { dry_stop(ERR_HEATER_OVERHEAT); return; }
+    g_warn_bits &= (uint16_t)~(WARN_FAN | WARN_HEATER_HOT);
+    if ((g_state == DRY_DRYING) && g_fan_pwm_byte >= FAN_TACH_MIN_PWM_BYTE &&
+        (g_tick - g_last_fan_cmd_tick) >= FAN_TACH_FAIL_MS && g_fan_rpm == 0U) {
+        dry_stop(ERR_FAN); return;
+    }
     if ((g_state == DRY_DRYING) && !fan_ok()) g_warn_bits |= WARN_FAN;
     if (!power_ok()) g_warn_bits |= WARN_FAN;
     if (g_heater_temp_c10 >= 950) { g_warn_bits |= WARN_HEATER_HOT; fan_set_pwm(FAN_DRY_PWM); }
@@ -1077,7 +1250,7 @@ static void control_task(void)
     if ((g_tick - g_dry_start_tick) >= g_dry_duration_ms) { dry_stop(0U); return; }
     g_time_left_min = (uint16_t)((g_dry_duration_ms - (g_tick - g_dry_start_tick) + 59999UL) / 60000UL);
     target_c10 = (int16_t)g_target_temp_c * 10;
-    err = (int16_t)(target_c10 - g_heater_temp_c10);
+    err = (int16_t)(target_c10 - g_air_temp_c10);
     if (err <= 0) g_heater_output_pct = 0U;
     else if (err >= 300) g_heater_output_pct = 100U;
     else g_heater_output_pct = (uint8_t)(err / 3);
@@ -1099,6 +1272,7 @@ int main(void)
     NVIC_EnableIRQ(SysTicK_IRQn);
 
     gpio_init_all();
+    fan_tach_init();
     fan_pwm_init();
     WS2812BDMAInit();
     argb_status_update();
@@ -1117,6 +1291,8 @@ int main(void)
         bus_poll();
         hb_led_task();
         argb_update_task();
+        bus_poll();
+        fan_tach_task();
         bus_poll();
         display_task(false);
         bus_poll();

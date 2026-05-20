@@ -46,6 +46,21 @@ ST_NO_TAG    = 0x05
 ST_NOT_READY = 0x06
 
 DEV_TYPE_NAMES = {0x00: "heater", 0x01: "rewinder"}
+HEATER_ERROR_NAMES = {
+    0x0001: "FAN",
+    0x0002: "HEATER_OVERHEAT",
+    0x0004: "DOOR_OPEN",
+    0x0008: "PCB_OVERHEAT",
+    0x0010: "NTC",
+    0x0020: "MASTER_LOST",
+    0x0040: "AIR_SENSOR",
+}
+HEATER_WARN_NAMES = {
+    0x0001: "AIR_SENSOR",
+    0x0002: "HEATER_HOT",
+    0x0004: "FAN",
+    0x0008: "DOOR_OPEN",
+}
 
 
 def crc16_ccitt(data: bytes) -> int:
@@ -61,6 +76,14 @@ def status_name(st: int) -> str:
     return {ST_OK: "OK", ST_BAD_CMD: "BAD_CMD", ST_BAD_ARG: "BAD_ARG",
             ST_IO_ERR: "IO_ERR", ST_NO_TAG: "NO_TAG", ST_NOT_READY: "NOT_READY",
             }.get(st, f"0x{st:02X}")
+
+
+def bit_names(bits: int, names: dict[int, str]) -> str:
+    found = [name for mask, name in names.items() if bits & mask]
+    unknown = bits & ~sum(names)
+    if unknown:
+        found.append(f"0x{unknown:04X}")
+    return ",".join(found) if found else "none"
 
 
 class LiveClient:
@@ -351,9 +374,17 @@ def do_heater_status(cli: LiveClient, _tokens):
     air = struct.unpack("<h", p[10:12])[0]
     hum = struct.unpack("<H", p[12:14])[0]
     left = struct.unpack("<H", p[18:20])[0]
-    print(f"status=OK state={p[1]} error=0x{err:04X} warn=0x{warn:04X}")
+    print(f"status=OK state={p[1]} error=0x{err:04X}({bit_names(err, HEATER_ERROR_NAMES)}) warn=0x{warn:04X}({bit_names(warn, HEATER_WARN_NAMES)})")
     print(f"pcb={fmt_c10(pcb)} heater={fmt_c10(heater)} air={fmt_c10(air)} humidity={fmt_rh10(hum)}")
     print(f"door={p[14]} fan={p[15]} power={p[16]} target={p[17]}C left={left}min heater_out={p[20]}% fan_pwm={p[21]}")
+    if len(p) >= 26:
+        pcb_raw = struct.unpack("<H", p[22:24])[0]
+        heater_raw = struct.unpack("<H", p[24:26])[0]
+        print(f"adc_raw pcb={pcb_raw} heater={heater_raw}")
+    if len(p) >= 30:
+        fan_rpm = struct.unpack("<H", p[26:28])[0]
+        fan_min_rpm = struct.unpack("<H", p[28:30])[0]
+        print(f"fan_tach rpm={fan_rpm} min={fan_min_rpm}")
 
 
 def do_heater_start(cli: LiveClient, tokens):
@@ -366,7 +397,12 @@ def do_heater_start(cli: LiveClient, tokens):
     if not (40 <= target <= 60) or not (1 <= minutes <= 1440):
         print("target 40-60C, minutes 1-1440"); return
     p = cli.request(CMD_HEATER_START, bytes([target]) + struct.pack("<H", minutes))
-    print(f"status={status_name(p[0])} target={target}C minutes={minutes}")
+    if len(p) >= 5:
+        err = struct.unpack("<H", p[1:3])[0]
+        warn = struct.unpack("<H", p[3:5])[0]
+        print(f"status={status_name(p[0])} error=0x{err:04X}({bit_names(err, HEATER_ERROR_NAMES)}) warn=0x{warn:04X}({bit_names(warn, HEATER_WARN_NAMES)}) target={target}C minutes={minutes}")
+    else:
+        print(f"status={status_name(p[0])} target={target}C minutes={minutes}")
 
 
 def do_heater_stop(cli: LiveClient, _tokens):
