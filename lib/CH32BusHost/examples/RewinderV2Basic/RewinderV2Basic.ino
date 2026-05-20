@@ -40,7 +40,7 @@ void setup() {
   delay(300);
 
   Serial1.begin(460800, SERIAL_8N1, BUS_RX_PIN, BUS_TX_PIN);
-  host.begin(Serial1, BUS_RX_PIN, BUS_TX_PIN, 460800, 115200, BUS_DIR_PIN);
+  host.begin(Serial1, BUS_RX_PIN, BUS_TX_PIN, 460800, 460800, BUS_DIR_PIN);
   host.setDeviceAddress(0x01);
 
   CH32BusHost::DeviceInfo devices[4];

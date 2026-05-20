@@ -47,6 +47,23 @@ uint32_t WS2812BLEDCallback( int ledno );
 #define DMALEDS 16
 #endif
 
+#ifndef WS2812_GPIO_PORT
+#define WS2812_GPIO_PORT GPIOC
+#endif
+
+#ifndef WS2812_GPIO_PORT_CLOCK
+#define WS2812_GPIO_PORT_CLOCK RCC_APB2Periph_GPIOC
+#endif
+
+#ifndef WS2812_GPIO_PIN_INDEX
+#define WS2812_GPIO_PIN_INDEX 6
+#endif
+
+#ifndef RCC_APB2Periph_AFIO
+#define RCC_APB2Periph_AFIO RCC_PB2Periph_AFIO
+#endif
+
+
 // Note first n LEDs of DMA Buffer are 0's as a "break"
 // Need one extra LED at end to leave line high. 
 // This must be greater than WS2812B_RESET_PERIOD.
@@ -288,11 +305,15 @@ void WS2812BDMAInit( )
 	NVIC_EnableIRQ( SPI0_IRQn );
 #else
 	RCC->AHBPCENR |= RCC_AHBPeriph_DMA1;
-	RCC->APB2PCENR |= RCC_APB2Periph_GPIOC | RCC_APB2Periph_SPI1;
+	RCC->APB2PCENR |= WS2812_GPIO_PORT_CLOCK | RCC_APB2Periph_AFIO | RCC_APB2Periph_SPI1;
+
+#ifdef WS2812_SPI_REMAP
+	GPIO_PinRemapConfig(WS2812_SPI_REMAP, ENABLE);
+#endif
 
 	// MOSI, Configure GPIO Pin
-	GPIOC->CFGLR &= ~(0xf<<(4*6));
-	GPIOC->CFGLR |= (GPIO_Speed_10MHz | GPIO_CNF_OUT_PP_AF)<<(4*6);
+	WS2812_GPIO_PORT->CFGLR &= ~(0xf<<(4*WS2812_GPIO_PIN_INDEX));
+	WS2812_GPIO_PORT->CFGLR |= (GPIO_Speed_10MHz | GPIO_CNF_OUT_PP_AF)<<(4*WS2812_GPIO_PIN_INDEX);
 
 	// Configure SPI 
 	SPI1->CTLR1 = 

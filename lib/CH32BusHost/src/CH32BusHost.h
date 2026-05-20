@@ -46,6 +46,24 @@ public:
     uint8_t reportedAddr;
   };
 
+  struct HeaterStatus {
+    uint8_t status;
+    uint8_t dryerState;
+    uint16_t errorBits;
+    uint16_t warnBits;
+    int16_t pcbTempC10;
+    int16_t heaterTempC10;
+    int16_t airTempC10;
+    uint16_t humidityRh10;
+    uint8_t doorStatus;
+    uint8_t fanStatus;
+    uint8_t powerStatus;
+    uint8_t targetTempC;
+    uint16_t timeLeftMin;
+    uint8_t heaterOutputPct;
+    uint8_t fanPwm;
+  };
+
   CH32BusHost();
 
   typedef size_t (*FsStatFn)();
@@ -54,7 +72,7 @@ public:
              int8_t rxPin,
              int8_t txPin,
              uint32_t busBaud = 460800,
-             uint32_t iapBaud = 115200,
+             uint32_t iapBaud = 460800,
              int8_t dirPin = -1,
              bool dirTxHigh = true);
 
@@ -75,6 +93,10 @@ public:
   bool motorCtrl(uint8_t channel, uint8_t speed, uint8_t *status = nullptr);
   bool sendHeartbeat(uint8_t *status = nullptr);
   bool readHeartbeat(HeartbeatInfo &out, uint32_t timeoutMs = 1000);
+  bool heaterStart(uint8_t targetTempC, uint16_t durationMin, uint8_t *status = nullptr);
+  bool heaterStop(uint8_t *status = nullptr);
+  bool heaterClearError(uint8_t *status = nullptr);
+  bool heaterStatus(HeaterStatus &out, uint8_t *status = nullptr);
 
   bool firmwareInfo(size_t &sizeBytes);
   bool firmwareRead(size_t offset, uint8_t *out, size_t maxLen, size_t &readLen);
@@ -89,6 +111,7 @@ public:
 
   void setIapDevAddr(uint8_t addr);
   void setDeviceAddress(uint8_t addr);
+  uint8_t deviceAddress() const;
 
   bool iapProbe();
   bool flashStoredFirmware(Stream *log = nullptr);
@@ -106,6 +129,10 @@ private:
   static const uint8_t CMD_READ_FILAMENT = 0x33;
   static const uint8_t CMD_MOTOR_CTRL = 0x40;
   static const uint8_t CMD_GET_SWITCH_STATUS = 0x41;
+  static const uint8_t CMD_HEATER_STATUS = 0x50;
+  static const uint8_t CMD_HEATER_START = 0x51;
+  static const uint8_t CMD_HEATER_STOP = 0x52;
+  static const uint8_t CMD_HEATER_CLEAR_ERROR = 0x53;
   static const uint8_t CMD_HB = 0x70;
   static const uint8_t BROADCAST_ADDR = 0xFF;
 

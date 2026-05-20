@@ -77,6 +77,8 @@ static bool decode_hex_string(const String &hex, uint8_t *out, size_t max_out, s
 
 static void print_help() {
   Serial.println("Commands:");
+  Serial.println("  a        show target address");
+  Serial.println("  a 0x02   set target address");
   Serial.println("  p        ping");
   Serial.println("  v        version");
   Serial.println("  i        device info");
@@ -122,6 +124,30 @@ static void cmd_discover() {
     Serial.print("  ");
     print_device_info(devices[i]);
   }
+  if (count == 1U) {
+    Serial.print("target addr=0x");
+    if (devices[0].deviceAddr < 0x10U) Serial.print('0');
+    Serial.println(devices[0].deviceAddr, HEX);
+  }
+}
+
+static void cmd_addr(const String &args) {
+  if (args.length() == 0U) {
+    uint8_t addr = g_host.deviceAddress();
+    Serial.print("target addr=0x");
+    if (addr < 0x10U) Serial.print('0');
+    Serial.println(addr, HEX);
+    return;
+  }
+  unsigned long addr = strtoul(args.c_str(), nullptr, 0);
+  if (addr > 0xFEUL) {
+    Serial.println("ERR addr_range");
+    return;
+  }
+  g_host.setDeviceAddress((uint8_t)addr);
+  Serial.print("target addr=0x");
+  if (addr < 0x10UL) Serial.print('0');
+  Serial.println(addr, HEX);
 }
 
 static void cmd_heartbeat() {
@@ -397,6 +423,8 @@ void loop() {
   if (cmd.isEmpty()) return;
 
   if (cmd == "p") cmd_ping();
+  else if (cmd == "a") cmd_addr("");
+  else if (cmd.startsWith("a ")) cmd_addr(cmd.substring(2));
   else if (cmd == "v") cmd_version();
   else if (cmd == "i") cmd_device_info();
   else if (cmd == "d" || cmd == "discover") cmd_discover();

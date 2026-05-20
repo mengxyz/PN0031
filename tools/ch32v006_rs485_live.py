@@ -32,6 +32,10 @@ CMD_READ_UID          = 0x32
 CMD_READ_FILAMENT     = 0x33
 CMD_MOTOR_CTRL        = 0x40
 CMD_GET_SWITCH_STATUS = 0x41
+CMD_HEATER_STATUS     = 0x50
+CMD_HEATER_START      = 0x51
+CMD_HEATER_STOP       = 0x52
+CMD_HEATER_CLEAR_ERROR = 0x53
 CMD_HB                = 0x70
 
 ST_OK        = 0x00
@@ -66,6 +70,7 @@ class LiveClient:
         self.seq = 0
         self.debug = debug
         self.no_hb = no_hb
+        self._io_lock = threading.RLock()
         self._rx_queue: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._keepalive_addrs: list = []
@@ -78,11 +83,17 @@ class LiveClient:
         if addr not in self._keepalive_addrs:
             self._keepalive_addrs.append(addr)
 
+    def set_addr(self, addr: int):
+        if not (0 <= addr <= 0xFE):
+            raise ValueError("address must be 0x00..0xFE")
+        self.addr = addr
+
     def _keepalive_thread(self):
         while not self._stop.is_set():
             for addr in list(self._keepalive_addrs):
                 try:
-                    self._send_frame(CMD_HB, b"", dest=addr)
+                    with self._io_lock:
+                        self._send_frame(CMD_HB, b"", dest=addr)
                 except Exception:
                     pass
             self._stop.wait(2.0)
@@ -164,37 +175,41 @@ class LiveClient:
 
     def request(self, cmd: int, payload: bytes = b"", timeout_s: float = 1.0,
                 dest: int | None = None) -> bytes:
-        self._drain()
-        seq = self._send_frame(cmd, payload, dest=dest)
-        deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            try:
-                _addr, rc_cmd, rc_seq, rc_payload = self._rx_queue.get(timeout=0.1)
-                if rc_cmd == (cmd | 0x80) and rc_seq == seq:
-                    return rc_payload
-            except queue.Empty:
-                continue
-        raise TimeoutError(f"no response to cmd=0x{cmd:02X}")
+        with self._io_lock:
+            self._drain()
+            seq = self._send_frame(cmd, payload, dest=dest)
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                try:
+                    wait_s = max(0.001, min(0.05, deadline - time.time()))
+                    _addr, rc_cmd, rc_seq, rc_payload = self._rx_queue.get(timeout=wait_s)
+                    if rc_cmd == (cmd | 0x80) and rc_seq == seq:
+                        return rc_payload
+                except queue.Empty:
+                    continue
+            raise TimeoutError(f"no response to cmd=0x{cmd:02X}")
 
     def discover(self, collect_s: float = 2.0):
-        self._drain()
-        self._send_frame(CMD_DISCOVER, b"", dest=BROADCAST_ADDR)
-        found = []
-        deadline = time.time() + collect_s
-        while time.time() < deadline:
-            try:
-                dev_addr, rc_cmd, _seq, p = self._rx_queue.get(timeout=0.15)
-                if rc_cmd == (CMD_DISCOVER | 0x80) and len(p) >= 14 and p[0] == ST_OK:
-                    found.append({
-                        "dev_addr": dev_addr,
-                        "type":     p[1],
-                        "addr":     p[2],
-                        "version":  (p[3], p[4], p[5]),
-                        "uid":      p[6:14].hex().upper(),
-                    })
-            except queue.Empty:
-                break
-        return found
+        with self._io_lock:
+            self._drain()
+            self._send_frame(CMD_DISCOVER, b"", dest=BROADCAST_ADDR)
+            found = []
+            deadline = time.time() + collect_s
+            while time.time() < deadline:
+                try:
+                    wait_s = max(0.001, min(0.15, deadline - time.time()))
+                    dev_addr, rc_cmd, _seq, p = self._rx_queue.get(timeout=wait_s)
+                    if rc_cmd == (CMD_DISCOVER | 0x80) and len(p) >= 14 and p[0] == ST_OK:
+                        found.append({
+                            "dev_addr": dev_addr,
+                            "type":     p[1],
+                            "addr":     p[2],
+                            "version":  (p[3], p[4], p[5]),
+                            "uid":      p[6:14].hex().upper(),
+                        })
+                except queue.Empty:
+                    continue
+            return found
 
 
 # ------------------------------------------------------------------ #
@@ -214,6 +229,83 @@ def do_discover(cli: LiveClient, _tokens):
         print(f"  addr=0x{d['dev_addr']:02X}  type={tname}  "
               f"version={v[0]}.{v[1]}.{v[2]}  uid={d['uid']}")
         cli.register_device(d["dev_addr"])
+    if len(devices) == 1:
+        cli.set_addr(devices[0]["dev_addr"])
+        print(f"target addr set to 0x{cli.addr:02X}")
+
+
+def _parse_scan_range(tokens):
+    if not tokens:
+        return 0, 254
+    if len(tokens) == 1 and "-" in tokens[0]:
+        a, b = tokens[0].split("-", 1)
+        return int(a, 0), int(b, 0)
+    if len(tokens) == 1:
+        addr = int(tokens[0], 0)
+        return addr, addr
+    if len(tokens) == 2:
+        return int(tokens[0], 0), int(tokens[1], 0)
+    raise ValueError("usage: scan [start-end] | [start end] | [addr]")
+
+
+def do_scan(cli: LiveClient, tokens):
+    try:
+        start, end = _parse_scan_range(tokens)
+    except ValueError as e:
+        print(e)
+        return
+    if start > end:
+        start, end = end, start
+    if start < 0 or end > 255:
+        print("address range must be 0..255")
+        return
+
+    print(f"scanning addressed ping 0x{start:02X}..0x{end:02X}...")
+    found = []
+    keepalive_addrs = list(cli._keepalive_addrs)
+    cli._keepalive_addrs.clear()
+    try:
+        for addr in range(start, end + 1):
+            if addr == BROADCAST_ADDR:
+                continue
+            try:
+                p = cli.request(CMD_PING, timeout_s=0.06, dest=addr)
+            except TimeoutError:
+                continue
+            except Exception:
+                continue
+            if len(p) >= 14 and p[0] == ST_OK:
+                found.append((p[2], p))
+    finally:
+        cli._keepalive_addrs[:] = keepalive_addrs
+
+    if not found:
+        print("no devices found")
+        return
+    print(f"found {len(found)} device(s):")
+    seen = set()
+    for dev_addr, p in found:
+        if dev_addr in seen:
+            continue
+        seen.add(dev_addr)
+        uid = p[6:14].hex().upper()
+        tname = DEV_TYPE_NAMES.get(p[1], f"0x{p[1]:02X}")
+        print(f"  addr=0x{dev_addr:02X}  type={tname}  "
+              f"version={p[3]}.{p[4]}.{p[5]}  uid={uid}")
+    if len(seen) == 1:
+        cli.set_addr(next(iter(seen)))
+        print(f"target addr set to 0x{cli.addr:02X}")
+
+
+def do_addr(cli: LiveClient, tokens):
+    if not tokens:
+        print(f"target addr=0x{cli.addr:02X}")
+        return
+    if len(tokens) != 1:
+        print("usage: addr [0x00-0xFE]")
+        return
+    cli.set_addr(int(tokens[0], 0))
+    print(f"target addr set to 0x{cli.addr:02X}")
 
 
 def do_ping(cli: LiveClient, _tokens):
@@ -237,6 +329,54 @@ def do_heartbeat(cli: LiveClient, _tokens):
     print(f"status={status_name(p[0])} type={DEV_TYPE_NAMES.get(typ, f'0x{typ:02X}')} addr=0x{addr:02X}")
     if len(p) >= 3:
         cli.register_device(addr)
+
+
+def fmt_c10(v):
+    return "NA" if v == 0x7FFF else f"{v / 10:.1f}C"
+
+
+def fmt_rh10(v):
+    return "NA" if v == 0xFFFF else f"{v / 10:.1f}%"
+
+
+def do_heater_status(cli: LiveClient, _tokens):
+    p = cli.request(CMD_HEATER_STATUS)
+    if p[0] != ST_OK or len(p) < 22:
+        print(f"status={status_name(p[0])}")
+        return
+    err = struct.unpack("<H", p[2:4])[0]
+    warn = struct.unpack("<H", p[4:6])[0]
+    pcb = struct.unpack("<h", p[6:8])[0]
+    heater = struct.unpack("<h", p[8:10])[0]
+    air = struct.unpack("<h", p[10:12])[0]
+    hum = struct.unpack("<H", p[12:14])[0]
+    left = struct.unpack("<H", p[18:20])[0]
+    print(f"status=OK state={p[1]} error=0x{err:04X} warn=0x{warn:04X}")
+    print(f"pcb={fmt_c10(pcb)} heater={fmt_c10(heater)} air={fmt_c10(air)} humidity={fmt_rh10(hum)}")
+    print(f"door={p[14]} fan={p[15]} power={p[16]} target={p[17]}C left={left}min heater_out={p[20]}% fan_pwm={p[21]}")
+
+
+def do_heater_start(cli: LiveClient, tokens):
+    if len(tokens) != 2:
+        print("usage: heater-start <target C 40-60> <minutes>"); return
+    try:
+        target, minutes = int(tokens[0]), int(tokens[1])
+    except ValueError:
+        print("usage: heater-start <target C 40-60> <minutes>"); return
+    if not (40 <= target <= 60) or not (1 <= minutes <= 1440):
+        print("target 40-60C, minutes 1-1440"); return
+    p = cli.request(CMD_HEATER_START, bytes([target]) + struct.pack("<H", minutes))
+    print(f"status={status_name(p[0])} target={target}C minutes={minutes}")
+
+
+def do_heater_stop(cli: LiveClient, _tokens):
+    p = cli.request(CMD_HEATER_STOP)
+    print(f"status={status_name(p[0])}")
+
+
+def do_heater_clear(cli: LiveClient, _tokens):
+    p = cli.request(CMD_HEATER_CLEAR_ERROR)
+    print(f"status={status_name(p[0])}")
 
 
 def do_enter_boot(cli: LiveClient, _tokens):
@@ -326,10 +466,16 @@ def do_read_filament(cli: LiveClient, tokens):
 
 COMMANDS = {
     "discover":      (do_discover,      "broadcast discover all devices"),
+    "scan":          (do_scan,          "scan [start-end] addressed ping, default 0-254"),
+    "addr":          (do_addr,          "show/set target address"),
     "ping":          (do_ping,          "ping device"),
     "version":       (do_version,       "get firmware version"),
     "heartbeat":     (do_heartbeat,     "poll addressed heartbeat"),
     "keepalive":     (do_heartbeat,     "poll addressed heartbeat"),
+    "heater-status": (do_heater_status, "read heater status"),
+    "heater-start":  (do_heater_start,  "heater-start <target C> <minutes>"),
+    "heater-stop":   (do_heater_stop,   "stop heater dry cycle"),
+    "heater-clear":  (do_heater_clear,  "clear heater error latch"),
     "enter-boot":    (do_enter_boot,    "reboot into IAP bootloader"),
     "switch":        (do_switch,        "read limit switch states"),
     "motor":         (do_motor,         "motor <ch 1-4> <speed 0-255>"),

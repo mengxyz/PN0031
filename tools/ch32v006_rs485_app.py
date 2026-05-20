@@ -22,6 +22,10 @@ CMD_READ_UID          = 0x32
 CMD_READ_FILAMENT     = 0x33
 CMD_MOTOR_CTRL        = 0x40
 CMD_GET_SWITCH_STATUS = 0x41
+CMD_HEATER_STATUS     = 0x50
+CMD_HEATER_START      = 0x51
+CMD_HEATER_STOP       = 0x52
+CMD_HEATER_CLEAR_ERROR = 0x53
 CMD_HB                = 0x70
 
 ST_OK        = 0x00
@@ -165,6 +169,37 @@ class AppClient:
             raise RuntimeError("Short heartbeat response")
         return p[0], p[1], p[2]
 
+    def heater_start(self, target_c: int, minutes: int):
+        payload = bytes([target_c]) + struct.pack("<H", minutes)
+        return self.request(CMD_HEATER_START, payload)[0]
+
+    def heater_stop(self):
+        return self.request(CMD_HEATER_STOP)[0]
+
+    def heater_clear_error(self):
+        return self.request(CMD_HEATER_CLEAR_ERROR)[0]
+
+    def heater_status(self):
+        p = self.request(CMD_HEATER_STATUS)
+        if p[0] != ST_OK or len(p) < 22:
+            return p[0], None
+        return p[0], {
+            "state": p[1],
+            "error": struct.unpack("<H", p[2:4])[0],
+            "warn": struct.unpack("<H", p[4:6])[0],
+            "pcb_temp_c10": struct.unpack("<h", p[6:8])[0],
+            "heater_temp_c10": struct.unpack("<h", p[8:10])[0],
+            "air_temp_c10": struct.unpack("<h", p[10:12])[0],
+            "humidity_rh10": struct.unpack("<H", p[12:14])[0],
+            "door": p[14],
+            "fan": p[15],
+            "power": p[16],
+            "target_c": p[17],
+            "time_left_min": struct.unpack("<H", p[18:20])[0],
+            "heater_output_pct": p[20],
+            "fan_pwm": p[21],
+        }
+
     def enter_boot(self):
         return self.request(CMD_ENTER_BOOT, timeout_s=1.0)[0]
 
@@ -247,6 +282,41 @@ def cmd_heartbeat(cli: AppClient, _args):
     print(f"status={status_name(st)} type={DEV_TYPE_NAMES.get(typ, f'0x{typ:02X}')} addr=0x{addr:02X}")
 
 
+def fmt_c10(v):
+    return "NA" if v == 0x7FFF else f"{v / 10:.1f}C"
+
+
+def fmt_rh10(v):
+    return "NA" if v == 0xFFFF else f"{v / 10:.1f}%"
+
+
+def cmd_heater_status(cli: AppClient, _args):
+    st, d = cli.heater_status()
+    if st != ST_OK or not d:
+        print(f"status={status_name(st)}")
+        return
+    print(f"status=OK state={d['state']} error=0x{d['error']:04X} warn=0x{d['warn']:04X}")
+    print(f"pcb={fmt_c10(d['pcb_temp_c10'])} heater={fmt_c10(d['heater_temp_c10'])} "
+          f"air={fmt_c10(d['air_temp_c10'])} humidity={fmt_rh10(d['humidity_rh10'])}")
+    print(f"door={d['door']} fan={d['fan']} power={d['power']} target={d['target_c']}C "
+          f"left={d['time_left_min']}min heater_out={d['heater_output_pct']}% fan_pwm={d['fan_pwm']}")
+
+
+def cmd_heater_start(cli: AppClient, args):
+    st = cli.heater_start(args.target, args.minutes)
+    print(f"status={status_name(st)} target={args.target}C minutes={args.minutes}")
+
+
+def cmd_heater_stop(cli: AppClient, _args):
+    st = cli.heater_stop()
+    print(f"status={status_name(st)}")
+
+
+def cmd_heater_clear(cli: AppClient, _args):
+    st = cli.heater_clear_error()
+    print(f"status={status_name(st)}")
+
+
 def cmd_enter_boot(cli: AppClient, _args):
     st = cli.enter_boot()
     print(f"status={status_name(st)}")
@@ -312,8 +382,15 @@ def main():
     sp.add_parser("version",           help="get firmware version")
     sp.add_parser("heartbeat",         help="poll addressed heartbeat")
     sp.add_parser("hb",                help="poll addressed heartbeat")
+    sp.add_parser("heater-status",     help="read heater status")
+    sp.add_parser("heater-stop",       help="stop heater dry cycle")
+    sp.add_parser("heater-clear-error", help="clear heater error latch")
     sp.add_parser("enter-boot",        help="reboot into IAP bootloader")
     sp.add_parser("get-switch-status", help="read limit switch states")
+
+    p_hstart = sp.add_parser("heater-start", help="start heater dry cycle")
+    p_hstart.add_argument("target", type=int, help="target temp C, 40..60")
+    p_hstart.add_argument("minutes", type=int, help="duration minutes")
 
     p_motor = sp.add_parser("motor",   help="set motor speed")
     p_motor.add_argument("channel",    type=int, choices=[1, 2, 3, 4])
@@ -332,6 +409,10 @@ def main():
         raise SystemExit("--addr must be 0x01..0xFF")
     if args.cmd == "motor" and not (0 <= args.speed <= 255):
         raise SystemExit("speed must be 0-255")
+    if args.cmd == "heater-start" and not (40 <= args.target <= 60):
+        raise SystemExit("target must be 40-60C")
+    if args.cmd == "heater-start" and not (1 <= args.minutes <= 1440):
+        raise SystemExit("minutes must be 1-1440")
 
     cli = AppClient(args.port, args.baud, args.timeout, args.addr, args.debug)
     try:
@@ -341,6 +422,10 @@ def main():
             "version":           cmd_version,
             "heartbeat":         cmd_heartbeat,
             "hb":                cmd_heartbeat,
+            "heater-status":     cmd_heater_status,
+            "heater-start":      cmd_heater_start,
+            "heater-stop":       cmd_heater_stop,
+            "heater-clear-error": cmd_heater_clear,
             "enter-boot":        cmd_enter_boot,
             "get-switch-status": cmd_get_switch,
             "motor":             cmd_motor,

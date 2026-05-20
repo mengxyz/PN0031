@@ -20,6 +20,10 @@ void CH32BusHost::setDeviceAddress(uint8_t addr) {
   if (!_iapDevAddrOverridden) _iapDevAddr = addr;
 }
 
+uint8_t CH32BusHost::deviceAddress() const {
+  return _devAddr;
+}
+
 bool CH32BusHost::begin(HardwareSerial &serial,
                         int8_t rxPin,
                         int8_t txPin,
@@ -211,7 +215,7 @@ bool CH32BusHost::busRequestTo(uint8_t dest,
     uint32_t remaining = timeoutMs - (millis() - start);
     if (!busReadFrame(rx, remaining)) return false;
 
-    if (rx.cmd == CMD_HB) continue;
+    if (cmd != CMD_HB && (rx.cmd == CMD_HB || rx.cmd == static_cast<uint8_t>(CMD_HB | 0x80U))) continue;
     if (rx.cmd != static_cast<uint8_t>(cmd | 0x80U)) continue;
     if (rx.seq != seq) continue;
     if (rx.addr != dest && dest != BROADCAST_ADDR) continue;
@@ -296,6 +300,7 @@ bool CH32BusHost::discover(DeviceInfo *out, size_t maxDevices, size_t &count, ui
     }
     if (!seen && count < maxDevices) out[count++] = info;
   }
+  if (count == 1U && out != nullptr) setDeviceAddress(out[0].deviceAddr);
   clearError();
   return true;
 }
@@ -396,6 +401,60 @@ bool CH32BusHost::readHeartbeat(HeartbeatInfo &out, uint32_t timeoutMs) {
   }
   setError("bus timeout");
   return false;
+}
+
+bool CH32BusHost::heaterStart(uint8_t targetTempC, uint16_t durationMin, uint8_t *status) {
+  uint8_t req[3] = {targetTempC, static_cast<uint8_t>(durationMin & 0xFFU), static_cast<uint8_t>(durationMin >> 8)};
+  uint8_t rcCmd = 0, rcSeq = 0, pl[MAX_PAYLOAD];
+  uint16_t plLen = 0;
+  if (!busRequest(CMD_HEATER_START, req, sizeof(req), &rcCmd, &rcSeq, pl, &plLen, 1000)) return false;
+  if (plLen < 1U) { setError("bad heater start payload"); return false; }
+  if (status) *status = pl[0];
+  return true;
+}
+
+bool CH32BusHost::heaterStop(uint8_t *status) {
+  uint8_t rcCmd = 0, rcSeq = 0, pl[MAX_PAYLOAD];
+  uint16_t plLen = 0;
+  if (!busRequest(CMD_HEATER_STOP, nullptr, 0, &rcCmd, &rcSeq, pl, &plLen, 1000)) return false;
+  if (plLen < 1U) { setError("bad heater stop payload"); return false; }
+  if (status) *status = pl[0];
+  return true;
+}
+
+bool CH32BusHost::heaterClearError(uint8_t *status) {
+  uint8_t rcCmd = 0, rcSeq = 0, pl[MAX_PAYLOAD];
+  uint16_t plLen = 0;
+  if (!busRequest(CMD_HEATER_CLEAR_ERROR, nullptr, 0, &rcCmd, &rcSeq, pl, &plLen, 1000)) return false;
+  if (plLen < 1U) { setError("bad heater clear payload"); return false; }
+  if (status) *status = pl[0];
+  return true;
+}
+
+bool CH32BusHost::heaterStatus(HeaterStatus &out, uint8_t *status) {
+  uint8_t rcCmd = 0, rcSeq = 0, pl[MAX_PAYLOAD];
+  uint16_t plLen = 0;
+  if (!busRequest(CMD_HEATER_STATUS, nullptr, 0, &rcCmd, &rcSeq, pl, &plLen, 1000)) return false;
+  if (plLen < 1U) { setError("bad heater status payload"); return false; }
+  if (status) *status = pl[0];
+  if (pl[0] != ST_OK) return true;
+  if (plLen < 22U) { setError("short heater status"); return false; }
+  out.status = pl[0];
+  out.dryerState = pl[1];
+  out.errorBits = getU16Le(&pl[2]);
+  out.warnBits = getU16Le(&pl[4]);
+  out.pcbTempC10 = static_cast<int16_t>(getU16Le(&pl[6]));
+  out.heaterTempC10 = static_cast<int16_t>(getU16Le(&pl[8]));
+  out.airTempC10 = static_cast<int16_t>(getU16Le(&pl[10]));
+  out.humidityRh10 = getU16Le(&pl[12]);
+  out.doorStatus = pl[14];
+  out.fanStatus = pl[15];
+  out.powerStatus = pl[16];
+  out.targetTempC = pl[17];
+  out.timeLeftMin = getU16Le(&pl[18]);
+  out.heaterOutputPct = pl[20];
+  out.fanPwm = pl[21];
+  return true;
 }
 
 bool CH32BusHost::firmwareInfo(size_t &sizeBytes) {

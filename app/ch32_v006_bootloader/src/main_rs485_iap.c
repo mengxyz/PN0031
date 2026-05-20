@@ -7,17 +7,29 @@
 /* Device identity — change DEVICE_ADDR per unit (0x01–0xFE). */
 #define DEV_TYPE_HEATER   0x00U
 #define DEV_TYPE_REWINDER 0x01U
+#ifndef DEVICE_TYPE
 #define DEVICE_TYPE       DEV_TYPE_REWINDER
+#endif
+#ifndef DEVICE_ADDR
 #define DEVICE_ADDR       0x01U
+#endif
 #define BROADCAST_ADDR    0xFFU
 
+#ifndef RS485_DE_PORT
 #define RS485_DE_PORT GPIOD
+#endif
+#ifndef RS485_DE_PIN
 #define RS485_DE_PIN  GPIO_Pin_4
+#endif
 #define FORCE_IAP_PIN GPIO_Pin_1  /* PD1/SWIO: hold low at reset to stay in IAP */
 
 /* Single status LED on PD0. */
+#ifndef LED_PORT
 #define LED_PORT GPIOD
+#endif
+#ifndef LED_PIN
 #define LED_PIN  GPIO_Pin_0
+#endif
 
 #define APP_FLASH_BASE 0x08000000UL                       /* WCH user flash app base */
 #define IAP_CAL_ADDR   (0x08000000UL + 62UL*1024UL - 4UL) /* last word of 62KB flash = 0x0800F7FC */
